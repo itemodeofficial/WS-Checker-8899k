@@ -11,7 +11,7 @@ kind = "web"
 
   [[services]]
   name = "web"
-  paths = [ "/" ]
+  paths = [ "/", "/api" ]
   localPort = 23059
 
   [services.development]
