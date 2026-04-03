@@ -28,7 +28,8 @@ export type ConnectionState = "disconnected" | "qr" | "connecting" | "connected"
 
 export interface WAStatus {
   connection: ConnectionState;
-  qr: string | null;
+  /** Increments every time a new QR is generated. Load /api/qr?v={qrVersion} for the image. */
+  qrVersion: number;
 }
 
 export async function getStatus(): Promise<WAStatus> {
@@ -43,7 +44,7 @@ export async function connectWhatsApp(): Promise<{ message: string; connection: 
   return res.json();
 }
 
-export async function checkNumbers(numbers: string[]): Promise<CheckSession & { connection?: ConnectionState; qr?: string | null }> {
+export async function checkNumbers(numbers: string[]): Promise<CheckSession & { connection?: ConnectionState; qrVersion?: number }> {
   const res = await fetch(`${BASE}/check`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -51,9 +52,9 @@ export async function checkNumbers(numbers: string[]): Promise<CheckSession & { 
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Request failed" }));
-    const error = new Error(err.error || "Request failed") as Error & { connection?: string; qr?: string };
+    const error = new Error(err.error || "Request failed") as Error & { connection?: string; qrVersion?: number };
     error.connection = err.connection;
-    error.qr = err.qr;
+    error.qrVersion = err.qrVersion;
     throw error;
   }
   return res.json();

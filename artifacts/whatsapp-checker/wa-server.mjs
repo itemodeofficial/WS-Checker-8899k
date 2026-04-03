@@ -14,8 +14,10 @@ app.use(express.json());
 
 // In production PORT is injected by the platform; fall back to PYTHON_PORT for dev
 const PORT = parseInt(process.env.PORT || process.env.PYTHON_PORT || "5000", 10);
-const AUTH_DIR = join(__dirname, ".wa-auth");
-const DB_PATH = join(__dirname, ".wa-data", "checker.db");
+const IS_PROD = process.env.NODE_ENV === "production";
+// Use separate auth dirs so dev and prod never fight over the same WA session (440 loop)
+const AUTH_DIR = join(__dirname, IS_PROD ? ".wa-auth" : ".wa-auth-dev");
+const DB_PATH = join(__dirname, ".wa-data", IS_PROD ? "checker.db" : "checker-dev.db");
 
 if (!existsSync(AUTH_DIR)) mkdirSync(AUTH_DIR, { recursive: true });
 mkdirSync(join(__dirname, ".wa-data"), { recursive: true });
@@ -161,7 +163,8 @@ async function tgSend(message, key = null) {
 // ─── Connection state ─────────────────────────────────────────────────────────
 
 let waClient = null;
-let qrCode = null;
+let qrCode = null;       // base64 data URL, kept server-side only
+let qrVersion = 0;       // increments every time a new QR is generated
 let connectionState = "disconnected";
 let sseClients = new Set();
 
@@ -181,8 +184,14 @@ function broadcast(event, data) {
 
 function setConnectionState(state, qr = null) {
   connectionState = state;
-  qrCode = qr;
-  broadcast("status", { connection: state, qr });
+  if (qr !== null) {
+    qrCode = qr;
+    qrVersion++;
+  } else if (state !== "qr") {
+    qrCode = null;
+  }
+  // Broadcast qrVersion (an integer), NOT the full QR base64 — keeps SSE/status payloads tiny
+  broadcast("status", { connection: state, qrVersion: state === "qr" ? qrVersion : 0 });
 }
 
 function scheduleReconnect(delay = 2500) {
@@ -349,7 +358,7 @@ app.get("/api/events", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  res.write(`event: status\ndata: ${JSON.stringify({ connection: connectionState, qr: qrCode })}\n\n`);
+  res.write(`event: status\ndata: ${JSON.stringify({ connection: connectionState, qrVersion: connectionState === "qr" ? qrVersion : 0 })}\n\n`);
 
   const ping = setInterval(() => {
     try { res.write(": ping\n\n"); } catch (_) { clearInterval(ping); }
@@ -372,8 +381,23 @@ app.get("/api/healthz", (req, res) => {
 app.get("/api/status", (req, res) => {
   res.json({
     connection: connectionState,
-    qr: connectionState === "qr" ? qrCode : null,
+    // Return qrVersion (integer) so the client knows when to refresh /api/qr
+    // NOT the full base64 — keeps the payload tiny even on slow connections
+    qrVersion: connectionState === "qr" ? qrVersion : 0,
   });
+});
+
+// Serve the current QR code as a PNG image.
+// The client loads <img src="/api/qr?v={qrVersion}"> — ?v just busts the browser cache.
+app.get("/api/qr", (req, res) => {
+  if (!qrCode || connectionState !== "qr") {
+    return res.status(404).json({ error: "No QR available right now" });
+  }
+  const base64 = qrCode.replace(/^data:image\/png;base64,/, "");
+  const buf = Buffer.from(base64, "base64");
+  res.set("Content-Type", "image/png");
+  res.set("Cache-Control", "no-store");
+  res.send(buf);
 });
 
 // ─── Connect (manual trigger) ─────────────────────────────────────────────────
@@ -400,7 +424,7 @@ app.get("/api/check/:number", async (req, res) => {
     return res.status(503).json({
       error: "WhatsApp not connected. Please scan the QR code first.",
       connection: connectionState,
-      qr: connectionState === "qr" ? qrCode : null,
+      qrVersion: connectionState === "qr" ? qrVersion : 0,
     });
   }
 
@@ -443,7 +467,7 @@ app.post("/api/check", async (req, res) => {
     return res.status(503).json({
       error: "WhatsApp not connected. Please scan the QR code first.",
       connection: connectionState,
-      qr: connectionState === "qr" ? qrCode : null,
+      qrVersion: connectionState === "qr" ? qrVersion : 0,
     });
   }
 

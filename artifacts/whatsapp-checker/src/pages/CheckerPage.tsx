@@ -84,12 +84,12 @@ function HistoryItem({ session, onView }: { session: CheckSession; onView: () =>
 
 function ConnectionBanner({
   state,
-  qr,
+  qrVersion,
   onConnect,
   connecting,
 }: {
   state: ConnectionState;
-  qr: string | null;
+  qrVersion: number;
   onConnect: () => void;
   connecting: boolean;
 }) {
@@ -105,7 +105,7 @@ function ConnectionBanner({
 
   return (
     <div className="bg-white rounded-xl border border-border shadow-sm overflow-hidden mb-4">
-      {state === "qr" && qr ? (
+      {state === "qr" && qrVersion > 0 ? (
         <div className="p-6 flex flex-col items-center gap-4">
           <div className="text-center">
             <h2 className="font-bold text-foreground text-lg">Connect Your WhatsApp</h2>
@@ -117,7 +117,13 @@ function ConnectionBanner({
             </p>
           </div>
           <div className="border-4 border-primary/20 rounded-2xl p-2 bg-white shadow-inner">
-            <img src={qr} alt="WhatsApp QR code" className="w-72 h-72" />
+            {/* Load QR as a direct image — no giant base64 string in memory/network */}
+            <img
+              key={qrVersion}
+              src={`/api/qr?v=${qrVersion}`}
+              alt="WhatsApp QR code"
+              className="w-72 h-72"
+            />
           </div>
           <p className="text-xs text-muted-foreground">QR code refreshes automatically if it expires</p>
         </div>
@@ -664,7 +670,7 @@ export function CheckerPage() {
   const [viewingSession, setViewingSession] = useState<number | null>(null);
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
-  const [qrCode, setQrCode] = useState<string | null>(null);
+  const [qrVersion, setQrVersion] = useState<number>(0);
   const [connectPending, setConnectPending] = useState(false);
 
   const queryClient = useQueryClient();
@@ -678,7 +684,8 @@ export function CheckerPage() {
 
     function applyStatus(s: WAStatus) {
       setConnectionState(s.connection);
-      setQrCode(s.qr);
+      if (s.connection === "qr" && s.qrVersion > 0) setQrVersion(s.qrVersion);
+      else if (s.connection !== "qr") setQrVersion(0);
     }
 
     async function poll() {
@@ -838,7 +845,7 @@ export function CheckerPage() {
         {activeTab !== "api" && (
           <ConnectionBanner
             state={connectionState}
-            qr={qrCode}
+            qrVersion={qrVersion}
             onConnect={handleConnect}
             connecting={connectPending || connectionState === "connecting"}
           />
