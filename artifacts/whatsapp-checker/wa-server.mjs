@@ -211,23 +211,39 @@ async function startWhatsApp() {
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     isJidBroadcast,
+    Browsers,
   } = await import("@whiskeysockets/baileys");
 
   const pino = (await import("pino")).default;
   const logger = pino({ level: "silent" });
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const { version } = await fetchLatestBaileysVersion();
+
+  // Fetch latest WA version with a fallback so a network hiccup doesn't crash startup
+  let version;
+  try {
+    ({ version } = await fetchLatestBaileysVersion());
+  } catch (_) {
+    version = [2, 3000, 1023156030]; // known-good fallback
+  }
 
   const sock = makeWASocket({
     version,
     logger,
     printQRInTerminal: false,
+    // Identify as WhatsApp Web on Chrome — reduces fingerprint-based rejections
+    browser: Browsers.ubuntu("Chrome"),
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
+    // Generous timeouts to avoid 408 on slow networks
+    connectTimeoutMs: 60_000,
+    defaultQueryTimeoutMs: 60_000,
+    keepAliveIntervalMs: 15_000,
+    retryRequestDelayMs: 500,
     generateHighQualityLinkPreview: false,
+    syncFullHistory: false,
     shouldIgnoreJid: (jid) => isJidBroadcast(jid),
   });
 
@@ -239,7 +255,8 @@ async function startWhatsApp() {
 
     if (qr) {
       const QRCode = await import("qrcode");
-      const qrDataUrl = await QRCode.toDataURL(qr);
+      // Large, high-quality QR — easier for phones to scan
+      const qrDataUrl = await QRCode.toDataURL(qr, { scale: 12, margin: 2 });
       setConnectionState("qr", qrDataUrl);
       console.log("[WA] QR code ready — scan with your phone to link the account");
       tgSend(

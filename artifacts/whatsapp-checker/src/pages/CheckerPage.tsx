@@ -117,7 +117,7 @@ function ConnectionBanner({
             </p>
           </div>
           <div className="border-4 border-primary/20 rounded-2xl p-2 bg-white shadow-inner">
-            <img src={qr} alt="WhatsApp QR code" className="w-56 h-56" />
+            <img src={qr} alt="WhatsApp QR code" className="w-72 h-72" />
           </div>
           <p className="text-xs text-muted-foreground">QR code refreshes automatically if it expires</p>
         </div>
