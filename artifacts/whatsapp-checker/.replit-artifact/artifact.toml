@@ -29,3 +29,14 @@ to = "/index.html"
 [services.env]
 PORT = "23059"
 BASE_PATH = "/"
+
+[[services]]
+name = "api"
+paths = [ "/api" ]
+localPort = 5000
+
+[services.development]
+run = "python3 Whatsappchecker.py"
+
+[services.env]
+PYTHON_PORT = "5000"
