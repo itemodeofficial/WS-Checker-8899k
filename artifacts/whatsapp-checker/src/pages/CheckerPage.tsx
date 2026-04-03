@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { checkNumbers, getHistory, getStats, getSession, type CheckSession, type NumberResult } from "@/lib/api";
+import { checkNumbers, getHistory, getStats, getSession, getStatus, type CheckSession, type NumberResult, type ConnectionState } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 function StatCard({ label, value, color }: { label: string; value: string | number; color?: string }) {
@@ -56,7 +56,6 @@ function HistoryItem({ session, onView }: { session: CheckSession; onView: () =>
   const rate = session.total > 0
     ? Math.round((session.withWhatsapp / session.total) * 100)
     : 0;
-
   return (
     <button
       onClick={onView}
@@ -83,6 +82,41 @@ function HistoryItem({ session, onView }: { session: CheckSession; onView: () =>
   );
 }
 
+function ConnectionBanner({ state, qr }: { state: ConnectionState; qr: string | null }) {
+  if (state === "connected") return null;
+
+  return (
+    <div className="bg-white rounded-xl border border-border shadow-sm overflow-hidden mb-4">
+      {state === "qr" && qr ? (
+        <div className="p-6 flex flex-col items-center gap-4">
+          <div className="text-center">
+            <h2 className="font-bold text-foreground text-lg">Connect Your WhatsApp</h2>
+            <p className="text-sm text-muted-foreground mt-1 max-w-xs">
+              Open WhatsApp on your phone → tap <strong>Linked Devices</strong> → scan this QR code
+            </p>
+          </div>
+          <div className="border-4 border-primary/20 rounded-2xl p-2 bg-white shadow-inner">
+            <img src={qr} alt="WhatsApp QR code" className="w-56 h-56" />
+          </div>
+          <p className="text-xs text-muted-foreground">QR code refreshes automatically if it expires</p>
+        </div>
+      ) : (
+        <div className="p-5 flex items-center gap-4">
+          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-foreground">
+              {state === "connecting" || state === "disconnected" ? "Connecting to WhatsApp…" : "WhatsApp logged out — reconnecting…"}
+            </p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              A QR code will appear shortly. You only need to scan it once.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CheckerPage() {
   const [input, setInput] = useState("");
   const [results, setResults] = useState<CheckSession | null>(null);
@@ -90,6 +124,19 @@ export function CheckerPage() {
   const [viewingSession, setViewingSession] = useState<number | null>(null);
 
   const queryClient = useQueryClient();
+
+  const { data: status } = useQuery({
+    queryKey: ["status"],
+    queryFn: getStatus,
+    refetchInterval: (query) => {
+      const conn = query.state.data?.connection;
+      if (conn === "connected") return 10000;
+      return 2000;
+    },
+  });
+
+  const connectionState: ConnectionState = status?.connection ?? "connecting";
+  const qrCode = status?.qr ?? null;
 
   const { data: history = [] } = useQuery({
     queryKey: ["history"],
@@ -117,8 +164,13 @@ export function CheckerPage() {
       queryClient.invalidateQueries({ queryKey: ["stats"] });
       toast.success(`Checked ${data.total} numbers — ${data.withWhatsapp} have WhatsApp`);
     },
-    onError: (err: Error) => {
-      toast.error(err.message || "Check failed");
+    onError: (err: Error & { connection?: string; qr?: string }) => {
+      if (err.connection && err.connection !== "connected") {
+        queryClient.invalidateQueries({ queryKey: ["status"] });
+        toast.error("WhatsApp not connected — scan the QR code first");
+      } else {
+        toast.error(err.message || "Check failed");
+      }
     },
   });
 
@@ -127,15 +179,9 @@ export function CheckerPage() {
       .split(/[\n,;]+/)
       .map((l) => l.trim())
       .filter(Boolean);
-
-    if (lines.length === 0) {
-      toast.error("Please enter at least one phone number");
-      return;
-    }
-    if (lines.length > 100) {
-      toast.error("Maximum 100 numbers per check");
-      return;
-    }
+    if (lines.length === 0) { toast.error("Please enter at least one phone number"); return; }
+    if (lines.length > 100) { toast.error("Maximum 100 numbers per check"); return; }
+    if (connectionState !== "connected") { toast.error("WhatsApp not connected — scan the QR code first"); return; }
     setResults(null);
     mutation.mutate(lines);
   }
@@ -164,9 +210,24 @@ export function CheckerPage() {
           <div className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center text-white text-lg font-bold shadow">
             W
           </div>
-          <div>
+          <div className="flex-1">
             <h1 className="text-lg font-bold text-foreground leading-none">WhatsApp Checker</h1>
             <p className="text-xs text-muted-foreground">Verify which numbers have WhatsApp</p>
+          </div>
+          <div className={cn(
+            "flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full",
+            connectionState === "connected"
+              ? "bg-green-100 text-green-700"
+              : connectionState === "qr"
+              ? "bg-amber-100 text-amber-700"
+              : "bg-gray-100 text-gray-500"
+          )}>
+            <span className={cn(
+              "w-1.5 h-1.5 rounded-full",
+              connectionState === "connected" ? "bg-green-500" :
+              connectionState === "qr" ? "bg-amber-500" : "bg-gray-400"
+            )} />
+            {connectionState === "connected" ? "Connected" : connectionState === "qr" ? "Scan QR" : "Connecting…"}
           </div>
         </div>
         {/* Tabs */}
@@ -188,19 +249,19 @@ export function CheckerPage() {
         </div>
       </div>
 
-      <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+      <div className="max-w-3xl mx-auto px-4 py-6 space-y-0">
+        {/* Connection banner — always visible if not connected */}
+        <ConnectionBanner state={connectionState} qr={qrCode} />
 
         {/* CHECK TAB */}
         {activeTab === "check" && (
           <div className="space-y-4">
             <div className="bg-white rounded-xl border border-border p-5 shadow-sm space-y-3">
-              <div className="flex items-start justify-between">
-                <div>
-                  <h2 className="font-semibold text-foreground">Enter phone numbers</h2>
-                  <p className="text-sm text-muted-foreground mt-0.5">
-                    One per line, with country code (e.g. +1 234 567 8900). Up to 100 numbers.
-                  </p>
-                </div>
+              <div>
+                <h2 className="font-semibold text-foreground">Enter phone numbers</h2>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  One per line, with country code (e.g. +1 234 567 8900). Up to 100 numbers.
+                </p>
               </div>
               <textarea
                 value={input}
@@ -214,31 +275,29 @@ export function CheckerPage() {
                 </span>
                 <button
                   onClick={handleCheck}
-                  disabled={mutation.isPending || !input.trim()}
+                  disabled={mutation.isPending || !input.trim() || connectionState !== "connected"}
                   className={cn(
                     "px-5 py-2.5 rounded-lg font-semibold text-sm text-primary-foreground transition-all",
-                    mutation.isPending || !input.trim()
+                    mutation.isPending || !input.trim() || connectionState !== "connected"
                       ? "bg-primary/50 cursor-not-allowed"
                       : "bg-primary hover:bg-primary/90 shadow-sm active:scale-95"
                   )}
                 >
-                  {mutation.isPending ? "Checking..." : "Check Numbers"}
+                  {mutation.isPending ? "Checking…" : "Check Numbers"}
                 </button>
               </div>
             </div>
 
-            {/* Progress indicator */}
             {mutation.isPending && (
               <div className="bg-accent/60 rounded-xl border border-accent-foreground/10 p-4 flex items-center gap-3">
                 <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />
                 <div>
-                  <p className="text-sm font-medium text-foreground">Checking numbers...</p>
-                  <p className="text-xs text-muted-foreground">This may take a moment for large lists</p>
+                  <p className="text-sm font-medium text-foreground">Checking numbers via WhatsApp…</p>
+                  <p className="text-xs text-muted-foreground">Results are live — may take a moment for large lists</p>
                 </div>
               </div>
             )}
 
-            {/* Results */}
             {results && (
               <div className="space-y-3">
                 <div className="grid grid-cols-3 gap-3">
@@ -246,7 +305,6 @@ export function CheckerPage() {
                   <StatCard label="Has WhatsApp" value={results.withWhatsapp} color="text-green-600" />
                   <StatCard label="No WhatsApp" value={results.withoutWhatsapp} color="text-red-500" />
                 </div>
-
                 <div className="bg-white rounded-xl border border-border p-5 shadow-sm space-y-3">
                   <div className="flex items-center justify-between">
                     <h3 className="font-semibold text-foreground">Results</h3>
@@ -273,14 +331,12 @@ export function CheckerPage() {
           <div className="space-y-4">
             {viewingSession !== null && sessionDetail ? (
               <div className="space-y-3">
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => setViewingSession(null)}
-                    className="text-sm text-primary hover:underline font-medium"
-                  >
-                    ← Back to history
-                  </button>
-                </div>
+                <button
+                  onClick={() => setViewingSession(null)}
+                  className="text-sm text-primary hover:underline font-medium"
+                >
+                  ← Back to history
+                </button>
                 <div className="grid grid-cols-3 gap-3">
                   <StatCard label="Total" value={sessionDetail.total} />
                   <StatCard label="Has WhatsApp" value={sessionDetail.withWhatsapp} color="text-green-600" />
@@ -313,11 +369,7 @@ export function CheckerPage() {
                 ) : (
                   <div className="space-y-2">
                     {history.map((s) => (
-                      <HistoryItem
-                        key={s.id}
-                        session={s}
-                        onView={() => setViewingSession(s.id)}
-                      />
+                      <HistoryItem key={s.id} session={s} onView={() => setViewingSession(s.id)} />
                     ))}
                   </div>
                 )}
@@ -349,11 +401,9 @@ export function CheckerPage() {
         )}
       </div>
 
-      {/* Disclaimer */}
-      <div className="max-w-3xl mx-auto px-4 pb-8">
+      <div className="max-w-3xl mx-auto px-4 py-8">
         <p className="text-xs text-muted-foreground text-center">
-          This tool checks numbers via WhatsApp's public wa.me links. Results may vary and are not guaranteed to be 100% accurate.
-          Use responsibly and in compliance with applicable laws.
+          Checks numbers directly via your linked WhatsApp account. Use responsibly and in compliance with applicable laws.
         </p>
       </div>
     </div>

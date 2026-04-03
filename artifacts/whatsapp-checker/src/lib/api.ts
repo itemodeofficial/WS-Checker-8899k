@@ -24,7 +24,20 @@ export interface Stats {
   successRate: number;
 }
 
-export async function checkNumbers(numbers: string[]): Promise<CheckSession> {
+export type ConnectionState = "disconnected" | "qr" | "connecting" | "connected" | "logged_out";
+
+export interface WAStatus {
+  connection: ConnectionState;
+  qr: string | null;
+}
+
+export async function getStatus(): Promise<WAStatus> {
+  const res = await fetch(`${BASE}/status`);
+  if (!res.ok) throw new Error("Failed to fetch status");
+  return res.json();
+}
+
+export async function checkNumbers(numbers: string[]): Promise<CheckSession & { connection?: ConnectionState; qr?: string | null }> {
   const res = await fetch(`${BASE}/check`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -32,7 +45,10 @@ export async function checkNumbers(numbers: string[]): Promise<CheckSession> {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Request failed" }));
-    throw new Error(err.error || "Request failed");
+    const error = new Error(err.error || "Request failed") as Error & { connection?: string; qr?: string };
+    error.connection = err.connection;
+    error.qr = err.qr;
+    throw error;
   }
   return res.json();
 }
