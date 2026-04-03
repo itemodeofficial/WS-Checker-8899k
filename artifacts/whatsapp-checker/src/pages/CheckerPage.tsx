@@ -4,7 +4,6 @@ import { toast } from "sonner";
 import {
   checkNumbers,
   connectWhatsApp,
-  disconnectWhatsApp,
   getHistory,
   getStats,
   getSession,
@@ -87,29 +86,19 @@ function ConnectionBanner({
   state,
   qr,
   onConnect,
-  onDisconnect,
   connecting,
 }: {
   state: ConnectionState;
   qr: string | null;
   onConnect: () => void;
-  onDisconnect: () => void;
   connecting: boolean;
 }) {
   if (state === "connected") {
     return (
-      <div className="bg-green-50 border border-green-200 rounded-xl px-5 py-3 mb-4 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-sm font-semibold text-green-800">WhatsApp Connected</span>
-          <span className="text-xs text-green-600">— realtime status active</span>
-        </div>
-        <button
-          onClick={onDisconnect}
-          className="text-xs text-red-600 hover:text-red-800 font-medium border border-red-200 bg-white rounded-lg px-3 py-1 hover:bg-red-50 transition-colors"
-        >
-          Disconnect
-        </button>
+      <div className="bg-green-50 border border-green-200 rounded-xl px-5 py-3 mb-4 flex items-center gap-2">
+        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shrink-0" />
+        <span className="text-sm font-semibold text-green-800">WhatsApp Connected</span>
+        <span className="text-xs text-green-600">— realtime updates active</span>
       </div>
     );
   }
@@ -123,6 +112,9 @@ function ConnectionBanner({
             <p className="text-sm text-muted-foreground mt-1 max-w-xs">
               Open WhatsApp on your phone → tap <strong>Linked Devices</strong> → tap <strong>Link a Device</strong> → scan this QR code
             </p>
+            <p className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-1.5 mt-2 inline-block">
+              One-time scan — your session stays active permanently
+            </p>
           </div>
           <div className="border-4 border-primary/20 rounded-2xl p-2 bg-white shadow-inner">
             <img src={qr} alt="WhatsApp QR code" className="w-56 h-56" />
@@ -135,26 +127,22 @@ function ConnectionBanner({
             {connecting ? (
               <div className="w-7 h-7 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />
             ) : (
-              <div className="w-7 h-7 rounded-full bg-gray-100 flex items-center justify-center shrink-0">
-                <span className="text-gray-400 text-lg">●</span>
-              </div>
+              <div className="w-7 h-7 rounded-full bg-gray-100 flex items-center justify-center shrink-0 text-gray-400 text-lg">●</div>
             )}
             <div>
               <p className="text-sm font-semibold text-foreground">
-                {state === "connecting"
-                  ? "Connecting to WhatsApp…"
-                  : state === "logged_out"
-                  ? "WhatsApp logged out — reconnecting…"
+                {state === "connecting" ? "Connecting to WhatsApp…"
+                  : state === "logged_out" ? "Session expired — reconnecting…"
                   : "WhatsApp not connected"}
               </p>
               <p className="text-xs text-muted-foreground mt-0.5">
                 {state === "disconnected"
-                  ? "Click Connect to link your WhatsApp account."
+                  ? "Click Connect to link your WhatsApp account once."
                   : "A QR code will appear shortly. You only need to scan it once."}
               </p>
             </div>
           </div>
-          {(state === "disconnected" || state === "logged_out") && (
+          {state === "disconnected" && (
             <button
               onClick={onConnect}
               disabled={connecting}
@@ -188,394 +176,416 @@ function CodeBlock({ code }: { code: string }) {
   );
 }
 
-function MethodBadge({ method }: { method: string }) {
-  const colors: Record<string, string> = {
-    GET: "bg-blue-100 text-blue-700",
-    POST: "bg-green-100 text-green-700",
-    DELETE: "bg-red-100 text-red-700",
-  };
+
+function DocSection({
+  method,
+  path,
+  badge,
+  description,
+  children,
+}: {
+  method: string;
+  path: string;
+  badge?: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  const methodColor =
+    method === "POST" ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700";
   return (
-    <span className={cn("text-xs font-bold px-2 py-0.5 rounded font-mono", colors[method] ?? "bg-gray-100 text-gray-700")}>
-      {method}
-    </span>
+    <div className="bg-white rounded-xl border border-border shadow-sm overflow-hidden">
+      <div className="px-5 py-4 border-b border-border flex items-center gap-3 flex-wrap">
+        <span className={cn("text-xs font-bold px-2 py-0.5 rounded font-mono shrink-0", methodColor)}>{method}</span>
+        <code className="text-sm font-mono font-semibold text-foreground">{path}</code>
+        {badge && <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded font-medium">{badge}</span>}
+      </div>
+      <div className="p-5 space-y-4">
+        <p className="text-sm text-muted-foreground leading-relaxed">{description}</p>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Label({ children }: { children: React.ReactNode }) {
+  return <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">{children}</h4>;
+}
+
+function SchemaTable({ rows }: { rows: { field: string; type: string; note: string }[] }) {
+  return (
+    <div className="rounded-lg border border-border overflow-hidden text-xs">
+      <table className="w-full">
+        <thead className="bg-gray-50 border-b border-border">
+          <tr>
+            <th className="text-left px-3 py-2 font-semibold text-foreground w-1/4">Field</th>
+            <th className="text-left px-3 py-2 font-semibold text-foreground w-1/4">Type</th>
+            <th className="text-left px-3 py-2 font-semibold text-foreground">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i} className={i % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
+              <td className="px-3 py-2 font-mono text-foreground font-medium">{r.field}</td>
+              <td className="px-3 py-2 font-mono text-blue-600">{r.type}</td>
+              <td className="px-3 py-2 text-muted-foreground">{r.note}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ErrorRow({ status, condition, body }: { status: number; condition: string; body: string }) {
+  return (
+    <div className="rounded-lg border border-red-100 overflow-hidden text-xs">
+      <div className="bg-red-50 border-b border-red-100 px-3 py-1.5 flex items-center gap-2">
+        <span className="bg-red-200 text-red-800 font-mono font-bold px-1.5 py-0.5 rounded">{status}</span>
+        <span className="text-red-700">{condition}</span>
+      </div>
+      <CodeBlock code={body} />
+    </div>
   );
 }
 
 function DocsPage() {
-  const sections = [
-    {
-      method: "GET",
-      path: "/api/status",
-      title: "Connection Status",
-      description: "Get the current WhatsApp connection state and QR code image.",
-      response: `{
-  "connection": "qr" | "connecting" | "connected" | "disconnected" | "logged_out",
-  "qr": "data:image/png;base64,..." | null
-}`,
-      examples: [
-        {
-          label: "cURL",
-          code: `curl https://your-domain/api/status`,
-        },
-        {
-          label: "JavaScript (fetch)",
-          code: `const res = await fetch('/api/status');
-const { connection, qr } = await res.json();
-console.log(connection); // "connected"`,
-        },
-        {
-          label: "Python",
-          code: `import requests
-r = requests.get('https://your-domain/api/status')
-print(r.json())  # {'connection': 'connected', 'qr': None}`,
-        },
-      ],
-    },
-    {
-      method: "GET",
-      path: "/api/events",
-      title: "Realtime Status (SSE)",
-      description: "Server-Sent Events stream. Pushes status updates instantly when the connection state changes. No polling required.",
-      notes: ["Sends current state immediately on connect.", "Event name: status", "Keep-alive pings every 20 seconds."],
-      response: `// Each event payload:
-{
-  "connection": "connected" | "qr" | "disconnected" | ...,
-  "qr": "data:image/png;base64,..." | null
-}`,
-      examples: [
-        {
-          label: "JavaScript (EventSource)",
-          code: `const es = new EventSource('/api/events');
+  return (
+    <div className="space-y-5">
 
-es.addEventListener('status', (e) => {
-  const { connection, qr } = JSON.parse(e.data);
-  console.log('State:', connection);
-  if (qr) {
-    document.getElementById('qr').src = qr;
-  }
+      {/* Overview */}
+      <div className="bg-white rounded-xl border border-border p-5 shadow-sm">
+        <h2 className="font-bold text-lg text-foreground">WhatsApp Number Checker API</h2>
+        <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
+          REST API for checking whether phone numbers are registered on WhatsApp.
+          Requires a <strong>one-time QR scan</strong> to link your account — after that the session stays
+          active automatically, even across server restarts.
+          Base URL: <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs font-mono">/api</code>
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2 text-xs">
+          <span className="bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded">One-time login</span>
+          <span className="bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded">No API key</span>
+          <span className="bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded">SSE realtime</span>
+          <span className="bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded">Up to 100 numbers/request</span>
+        </div>
+      </div>
+
+      {/* Quick start */}
+      <div className="bg-white rounded-xl border border-border p-5 shadow-sm space-y-3">
+        <h3 className="font-semibold text-foreground">Quick Start</h3>
+        <ol className="text-sm text-muted-foreground space-y-1.5 list-decimal list-inside leading-relaxed">
+          <li>Check <code className="bg-gray-100 px-1 rounded text-xs font-mono">GET /api/status</code> — if <code className="bg-gray-100 px-1 rounded text-xs font-mono">connection</code> is <code className="bg-gray-100 px-1 rounded text-xs font-mono">"qr"</code>, display the QR image and scan it with your phone.</li>
+          <li>Wait until <code className="bg-gray-100 px-1 rounded text-xs font-mono">connection</code> becomes <code className="bg-gray-100 px-1 rounded text-xs font-mono">"connected"</code>. Use <code className="bg-gray-100 px-1 rounded text-xs font-mono">GET /api/events</code> (SSE) for instant notification.</li>
+          <li>Call <code className="bg-gray-100 px-1 rounded text-xs font-mono">POST /api/check</code> with your list of numbers.</li>
+          <li>Read <code className="bg-gray-100 px-1 rounded text-xs font-mono">results[].hasWhatsapp</code> in the response.</li>
+        </ol>
+        <Label>Full workflow (JavaScript)</Label>
+        <CodeBlock code={`// 1. Wait for connection
+const es = new EventSource('/api/events');
+await new Promise(resolve => {
+  es.addEventListener('status', function handler(e) {
+    if (JSON.parse(e.data).connection === 'connected') {
+      es.removeEventListener('status', handler);
+      resolve();
+    }
+  });
 });
 
-// Clean up when done
-// es.close();`,
-        },
-        {
-          label: "Python (sseclient)",
-          code: `import sseclient, requests
-
-res = requests.get('https://your-domain/api/events', stream=True)
-client = sseclient.SSEClient(res)
-
-for event in client.events():
-    if event.event == 'status':
-        import json
-        data = json.loads(event.data)
-        print(data['connection'])`,
-        },
-      ],
-    },
-    {
-      method: "POST",
-      path: "/api/connect",
-      title: "Connect",
-      description: "Initiate or re-initiate a WhatsApp connection. After calling this, poll /api/events or /api/status to get the QR code.",
-      requestBody: "None (empty body)",
-      response: `{
-  "message": "Connecting…",
-  "connection": "connecting"
-}`,
-      examples: [
-        {
-          label: "cURL",
-          code: `curl -X POST https://your-domain/api/connect`,
-        },
-        {
-          label: "JavaScript",
-          code: `const res = await fetch('/api/connect', { method: 'POST' });
-const data = await res.json();
-console.log(data.message); // "Connecting…"`,
-        },
-      ],
-    },
-    {
-      method: "POST",
-      path: "/api/disconnect",
-      title: "Disconnect",
-      description: "Log out from WhatsApp and clear the linked session. You will need to scan a new QR to reconnect.",
-      requestBody: "None (empty body)",
-      response: `{
-  "message": "Disconnected",
-  "connection": "disconnected"
-}`,
-      examples: [
-        {
-          label: "cURL",
-          code: `curl -X POST https://your-domain/api/disconnect`,
-        },
-        {
-          label: "JavaScript",
-          code: `await fetch('/api/disconnect', { method: 'POST' });`,
-        },
-      ],
-    },
-    {
-      method: "POST",
-      path: "/api/check",
-      title: "Check Numbers",
-      description: "Check whether phone numbers are registered on WhatsApp. Requires the connection to be in 'connected' state. Numbers should include country code. Maximum 100 numbers per request.",
-      requestBody: `{
-  "numbers": ["+12345678900", "+447911123456", "4915212345678"]
-}`,
-      response: `{
-  "id": 1,
-  "total": 3,
-  "withWhatsapp": 2,
-  "withoutWhatsapp": 1,
-  "checkedAt": "2025-01-15T10:30:00.000Z",
-  "results": [
-    {
-      "number": "+12345678900",
-      "formattedNumber": "+12345678900",
-      "hasWhatsapp": true,
-      "error": null
-    },
-    {
-      "number": "+447911123456",
-      "formattedNumber": "+447911123456",
-      "hasWhatsapp": false,
-      "error": null
-    },
-    {
-      "number": "bad",
-      "formattedNumber": "bad",
-      "hasWhatsapp": false,
-      "error": "Invalid number format"
-    }
-  ]
-}`,
-      errors: [
-        { status: 400, body: `{ "error": "numbers must be a non-empty array" }` },
-        { status: 400, body: `{ "error": "Maximum 100 numbers per request" }` },
-        { status: 503, body: `{ "error": "WhatsApp not connected. Please scan the QR code first.", "connection": "qr", "qr": "data:image/png;base64,..." }` },
-      ],
-      examples: [
-        {
-          label: "cURL",
-          code: `curl -X POST https://your-domain/api/check \\
-  -H "Content-Type: application/json" \\
-  -d '{"numbers":["+12345678900","+447911123456"]}'`,
-        },
-        {
-          label: "JavaScript",
-          code: `const res = await fetch('/api/check', {
+// 2. Check numbers
+const res = await fetch('/api/check', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    numbers: ['+12345678900', '+447911123456']
+    numbers: ['+12025551234', '+447700900123', '+4915112345678']
   })
+});
+const session = await res.json();
+
+// 3. Read results
+session.results.forEach(r => {
+  console.log(r.formattedNumber, r.hasWhatsapp ? '✓ has WhatsApp' : '✗ no WhatsApp');
+});`} />
+      </div>
+
+      {/* POST /api/check — the main endpoint */}
+      <DocSection
+        method="POST"
+        path="/api/check"
+        badge="Main endpoint"
+        description="Check whether phone numbers are registered on WhatsApp. The server must be in 'connected' state. Include country code in every number. Up to 100 numbers per call."
+      >
+        <div>
+          <Label>Request body</Label>
+          <SchemaTable rows={[
+            { field: "numbers", type: "string[]", note: "Phone numbers in E.164 format or digits only. Country code required. Max 100." },
+          ]} />
+        </div>
+        <div>
+          <Label>Request example</Label>
+          <CodeBlock code={`POST /api/check
+Content-Type: application/json
+
+{
+  "numbers": ["+12025551234", "+447700900123", "+4915112345678", "5511987654321"]
+}`} />
+        </div>
+        <div>
+          <Label>Response schema</Label>
+          <SchemaTable rows={[
+            { field: "id", type: "number", note: "Auto-incrementing session ID." },
+            { field: "total", type: "number", note: "How many numbers were checked." },
+            { field: "withWhatsapp", type: "number", note: "Count that have WhatsApp." },
+            { field: "withoutWhatsapp", type: "number", note: "Count that do not have WhatsApp." },
+            { field: "checkedAt", type: "string", note: "ISO 8601 timestamp of when the check ran." },
+            { field: "results", type: "NumberResult[]", note: "One entry per number — see table below." },
+          ]} />
+        </div>
+        <div>
+          <Label>NumberResult schema</Label>
+          <SchemaTable rows={[
+            { field: "number", type: "string", note: "The original value you submitted." },
+            { field: "formattedNumber", type: "string", note: "Normalized E.164 form used for the lookup, e.g. +12025551234." },
+            { field: "hasWhatsapp", type: "boolean", note: "true if the number is registered on WhatsApp." },
+            { field: "error", type: "string | null", note: "null on success. A message if the number was invalid or a lookup error occurred." },
+          ]} />
+        </div>
+        <div>
+          <Label>Success response (200)</Label>
+          <CodeBlock code={`{
+  "id": 3,
+  "total": 4,
+  "withWhatsapp": 3,
+  "withoutWhatsapp": 1,
+  "checkedAt": "2025-06-10T14:22:05.123Z",
+  "results": [
+    { "number": "+12025551234",   "formattedNumber": "+12025551234",   "hasWhatsapp": true,  "error": null },
+    { "number": "+447700900123",  "formattedNumber": "+447700900123",  "hasWhatsapp": true,  "error": null },
+    { "number": "+4915112345678", "formattedNumber": "+4915112345678", "hasWhatsapp": false, "error": null },
+    { "number": "bad-number",     "formattedNumber": "bad-number",     "hasWhatsapp": false, "error": "Invalid number format" }
+  ]
+}`} />
+        </div>
+        <div className="space-y-2">
+          <Label>Error responses</Label>
+          <ErrorRow status={400} condition="numbers field missing or not an array" body={`{ "error": "numbers must be a non-empty array" }`} />
+          <ErrorRow status={400} condition="more than 100 numbers submitted" body={`{ "error": "Maximum 100 numbers per request" }`} />
+          <ErrorRow status={503} condition="WhatsApp not yet connected" body={`{
+  "error": "WhatsApp not connected. Please scan the QR code first.",
+  "connection": "qr",
+  "qr": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+}`} />
+        </div>
+        <div className="space-y-3">
+          <Label>Code examples</Label>
+          <div>
+            <p className="text-xs text-muted-foreground mb-1">cURL</p>
+            <CodeBlock code={`curl -X POST https://your-domain/api/check \\
+  -H "Content-Type: application/json" \\
+  -d '{"numbers":["+12025551234","+447700900123"]}'`} />
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground mb-1">JavaScript</p>
+            <CodeBlock code={`const res = await fetch('/api/check', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ numbers: ['+12025551234', '+447700900123'] })
 });
 
 if (!res.ok) {
-  const err = await res.json();
-  throw new Error(err.error); // e.g. "WhatsApp not connected"
+  const { error } = await res.json();
+  throw new Error(error); // e.g. "WhatsApp not connected"
 }
 
-const session = await res.json();
-session.results.forEach(r => {
-  console.log(r.formattedNumber, r.hasWhatsapp ? '✓' : '✗');
-});`,
-        },
-        {
-          label: "Python",
-          code: `import requests
+const { id, total, withWhatsapp, results } = await res.json();
+console.log(\`Session \${id}: \${withWhatsapp}/\${total} have WhatsApp\`);
+
+results.forEach(r => {
+  const icon = r.error ? '⚠' : r.hasWhatsapp ? '✓' : '✗';
+  console.log(icon, r.formattedNumber);
+});`} />
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground mb-1">Python</p>
+            <CodeBlock code={`import requests
 
 r = requests.post('https://your-domain/api/check',
-    json={'numbers': ['+12345678900', '+447911123456']})
+    json={'numbers': ['+12025551234', '+447700900123', '+4915112345678']})
 
 if r.status_code != 200:
     print('Error:', r.json()['error'])
 else:
     data = r.json()
+    print(f"Session {data['id']}: {data['withWhatsapp']}/{data['total']} have WhatsApp")
     for result in data['results']:
-        icon = '✓' if result['hasWhatsapp'] else '✗'
-        print(f"{result['formattedNumber']} {icon}")`,
-        },
-      ],
-    },
-    {
-      method: "GET",
-      path: "/api/history",
-      title: "Check History",
-      description: "List all previous check sessions (summaries only). Sorted newest first.",
-      response: `[
-  {
-    "id": 2,
-    "total": 50,
-    "withWhatsapp": 38,
-    "withoutWhatsapp": 12,
-    "checkedAt": "2025-01-15T10:45:00.000Z"
-  },
-  {
-    "id": 1,
-    "total": 10,
-    "withWhatsapp": 7,
-    "withoutWhatsapp": 3,
-    "checkedAt": "2025-01-15T10:30:00.000Z"
+        icon = '⚠' if result['error'] else ('✓' if result['hasWhatsapp'] else '✗')
+        print(f"  {icon} {result['formattedNumber']}")`} />
+          </div>
+        </div>
+      </DocSection>
+
+      {/* GET /api/status */}
+      <DocSection
+        method="GET"
+        path="/api/status"
+        description="Return the current WhatsApp connection state and, when a QR scan is needed, the QR code image as a base64 data URL."
+      >
+        <div>
+          <Label>Response schema</Label>
+          <SchemaTable rows={[
+            { field: "connection", type: "string", note: "connecting | qr | connected | logged_out" },
+            { field: "qr", type: "string | null", note: "Base64 PNG data URL. Only present when connection === 'qr'." },
+          ]} />
+        </div>
+        <div className="space-y-2">
+          <Label>Response examples</Label>
+          <div>
+            <p className="text-xs text-muted-foreground mb-1">When connected</p>
+            <CodeBlock code={`{ "connection": "connected", "qr": null }`} />
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground mb-1">When QR scan is needed</p>
+            <CodeBlock code={`{
+  "connection": "qr",
+  "qr": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+}`} />
+          </div>
+        </div>
+        <div>
+          <Label>cURL</Label>
+          <CodeBlock code={`curl https://your-domain/api/status`} />
+        </div>
+      </DocSection>
+
+      {/* GET /api/events */}
+      <DocSection
+        method="GET"
+        path="/api/events"
+        description="Server-Sent Events stream. Pushes a 'status' event in real time whenever the connection state or QR code changes — no polling needed. The current state is sent immediately on connect."
+      >
+        <div>
+          <Label>Event format</Label>
+          <CodeBlock code={`event: status\ndata: { "connection": "connected", "qr": null }`} />
+        </div>
+        <div>
+          <Label>JavaScript (EventSource)</Label>
+          <CodeBlock code={`const es = new EventSource('/api/events');
+
+es.addEventListener('status', (e) => {
+  const { connection, qr } = JSON.parse(e.data);
+
+  if (connection === 'qr' && qr) {
+    document.getElementById('qr-img').src = qr; // Show QR to user
   }
-]`,
-      examples: [
-        {
-          label: "cURL",
-          code: `curl https://your-domain/api/history`,
-        },
-        {
-          label: "JavaScript",
-          code: `const sessions = await fetch('/api/history').then(r => r.json());
-sessions.forEach(s => {
-  console.log(\`Session \${s.id}: \${s.total} checked, \${s.withWhatsapp} have WhatsApp\`);
-});`,
-        },
-      ],
-    },
-    {
-      method: "GET",
-      path: "/api/history/:id",
-      title: "Session Detail",
-      description: "Get the full result of a specific check session, including per-number results.",
-      response: `{
-  "id": 1,
-  "total": 2,
-  "withWhatsapp": 1,
+  if (connection === 'connected') {
+    console.log('Ready to check numbers!');
+  }
+});
+
+// Stop listening when done
+// es.close();`} />
+        </div>
+        <div>
+          <Label>Python (sseclient-rs)</Label>
+          <CodeBlock code={`import sseclient, requests, json
+
+res = requests.get('https://your-domain/api/events', stream=True)
+for event in sseclient.SSEClient(res).events():
+    if event.event == 'status':
+        data = json.loads(event.data)
+        print(data['connection'])  # e.g. "connected"
+        if data['connection'] == 'connected':
+            break  # Ready to check numbers`} />
+        </div>
+      </DocSection>
+
+      {/* GET /api/history */}
+      <DocSection
+        method="GET"
+        path="/api/history"
+        description="List all past check sessions, newest first. Returns summaries — no per-number results. Use GET /api/history/:id to get full results for a specific session."
+      >
+        <div>
+          <Label>Response (array of session summaries)</Label>
+          <CodeBlock code={`[
+  { "id": 4, "total": 20, "withWhatsapp": 15, "withoutWhatsapp": 5, "checkedAt": "2025-06-10T15:00:00.000Z" },
+  { "id": 3, "total": 4,  "withWhatsapp": 3,  "withoutWhatsapp": 1, "checkedAt": "2025-06-10T14:22:05.123Z" }
+]`} />
+        </div>
+        <div>
+          <Label>cURL</Label>
+          <CodeBlock code={`curl https://your-domain/api/history`} />
+        </div>
+      </DocSection>
+
+      {/* GET /api/history/:id */}
+      <DocSection
+        method="GET"
+        path="/api/history/:id"
+        description="Get the full result of a specific session including every number's result. Use the id from GET /api/history."
+      >
+        <div>
+          <Label>Response</Label>
+          <CodeBlock code={`{
+  "id": 3,
+  "total": 4,
+  "withWhatsapp": 3,
   "withoutWhatsapp": 1,
-  "checkedAt": "2025-01-15T10:30:00.000Z",
+  "checkedAt": "2025-06-10T14:22:05.123Z",
   "results": [
-    { "number": "+12345678900", "formattedNumber": "+12345678900", "hasWhatsapp": true, "error": null },
-    { "number": "+999000000", "formattedNumber": "+999000000", "hasWhatsapp": false, "error": null }
+    { "number": "+12025551234",   "formattedNumber": "+12025551234",   "hasWhatsapp": true,  "error": null },
+    { "number": "+447700900123",  "formattedNumber": "+447700900123",  "hasWhatsapp": true,  "error": null },
+    { "number": "+4915112345678", "formattedNumber": "+4915112345678", "hasWhatsapp": false, "error": null },
+    { "number": "bad-number",     "formattedNumber": "bad-number",     "hasWhatsapp": false, "error": "Invalid number format" }
   ]
-}`,
-      errors: [{ status: 404, body: `{ "error": "Session not found" }` }],
-      examples: [
-        {
-          label: "cURL",
-          code: `curl https://your-domain/api/history/1`,
-        },
-        {
-          label: "JavaScript",
-          code: `const session = await fetch('/api/history/1').then(r => r.json());
-console.log(session.results);`,
-        },
-      ],
-    },
-    {
-      method: "GET",
-      path: "/api/stats",
-      title: "Aggregate Statistics",
-      description: "Overall statistics aggregated across all sessions.",
-      response: `{
-  "totalChecks": 5,
-  "totalNumbersChecked": 312,
-  "totalWithWhatsapp": 241,
-  "totalWithoutWhatsapp": 71,
-  "successRate": 77.2
-}`,
-      examples: [
-        {
-          label: "cURL",
-          code: `curl https://your-domain/api/stats`,
-        },
-        {
-          label: "JavaScript",
-          code: `const stats = await fetch('/api/stats').then(r => r.json());
-console.log(\`WhatsApp rate: \${stats.successRate}%\`);`,
-        },
-      ],
-    },
-    {
-      method: "GET",
-      path: "/api/healthz",
-      title: "Health Check",
-      description: "Lightweight health check endpoint. Useful for uptime monitoring.",
-      response: `{ "status": "ok", "connection": "connected" }`,
-      examples: [
-        {
-          label: "cURL",
-          code: `curl https://your-domain/api/healthz`,
-        },
-      ],
-    },
-  ];
-
-  return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-xl border border-border p-5 shadow-sm">
-        <h2 className="font-bold text-lg text-foreground">WhatsApp Checker API</h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          REST API for checking WhatsApp registration status of phone numbers. Requires a linked WhatsApp account (scan once via QR).
-          All endpoints return JSON. Base URL: <code className="bg-gray-100 px-1 rounded text-xs font-mono">/api</code>
-        </p>
-        <div className="mt-3 flex flex-wrap gap-2 text-xs">
-          <span className="bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded">No auth required</span>
-          <span className="bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded">SSE realtime</span>
-          <span className="bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded">Up to 100 numbers/request</span>
-          <span className="bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded">JSON responses</span>
+}`} />
         </div>
-      </div>
-
-      {sections.map((s) => (
-        <div key={s.path} className="bg-white rounded-xl border border-border shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-border flex items-center gap-3">
-            <MethodBadge method={s.method} />
-            <code className="text-sm font-mono font-semibold text-foreground">{s.path}</code>
-            <span className="text-sm text-muted-foreground">— {s.title}</span>
-          </div>
-          <div className="p-5 space-y-4">
-            <p className="text-sm text-muted-foreground">{s.description}</p>
-
-            {s.notes && (
-              <ul className="text-xs text-muted-foreground space-y-0.5 list-disc list-inside">
-                {s.notes.map((n, i) => <li key={i}>{n}</li>)}
-              </ul>
-            )}
-
-            {s.requestBody && (
-              <div>
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Request Body</h4>
-                <CodeBlock code={s.requestBody} />
-              </div>
-            )}
-
-            <div>
-              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Response</h4>
-              <CodeBlock code={s.response} />
-            </div>
-
-            {s.errors && s.errors.length > 0 && (
-              <div>
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Error Responses</h4>
-                <div className="space-y-2">
-                  {s.errors.map((e, i) => (
-                    <div key={i} className="flex items-start gap-2">
-                      <span className="bg-red-100 text-red-700 text-xs font-mono font-bold px-1.5 py-0.5 rounded shrink-0">{e.status}</span>
-                      <CodeBlock code={e.body} />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div>
-              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Examples</h4>
-              <div className="space-y-3">
-                {s.examples.map((ex, i) => (
-                  <div key={i}>
-                    <p className="text-xs text-muted-foreground mb-1">{ex.label}</p>
-                    <CodeBlock code={ex.code} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
+        <div className="space-y-2">
+          <Label>Error responses</Label>
+          <ErrorRow status={404} condition="session ID does not exist" body={`{ "error": "Session not found" }`} />
         </div>
-      ))}
+        <div>
+          <Label>cURL</Label>
+          <CodeBlock code={`curl https://your-domain/api/history/3`} />
+        </div>
+      </DocSection>
+
+      {/* GET /api/stats */}
+      <DocSection
+        method="GET"
+        path="/api/stats"
+        description="Cumulative totals and WhatsApp rate across all sessions run on this server."
+      >
+        <div>
+          <Label>Response</Label>
+          <CodeBlock code={`{
+  "totalChecks": 12,
+  "totalNumbersChecked": 847,
+  "totalWithWhatsapp": 631,
+  "totalWithoutWhatsapp": 216,
+  "successRate": 74.5
+}`} />
+        </div>
+        <div>
+          <Label>cURL</Label>
+          <CodeBlock code={`curl https://your-domain/api/stats`} />
+        </div>
+      </DocSection>
+
+      {/* GET /api/healthz */}
+      <DocSection
+        method="GET"
+        path="/api/healthz"
+        description="Lightweight health check. Returns 200 OK with current connection state."
+      >
+        <div>
+          <Label>Response</Label>
+          <CodeBlock code={`{ "status": "ok", "connection": "connected" }`} />
+        </div>
+        <div>
+          <Label>cURL</Label>
+          <CodeBlock code={`curl https://your-domain/api/healthz`} />
+        </div>
+      </DocSection>
+
     </div>
   );
 }
@@ -590,7 +600,7 @@ export function CheckerPage() {
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [qrCode, setQrCode] = useState<string | null>(null);
-  const [actionPending, setActionPending] = useState(false);
+  const [connectPending, setConnectPending] = useState(false);
 
   const queryClient = useQueryClient();
 
@@ -650,27 +660,14 @@ export function CheckerPage() {
   });
 
   async function handleConnect() {
-    setActionPending(true);
+    setConnectPending(true);
     try {
       await connectWhatsApp();
       setConnectionState("connecting");
     } catch {
       toast.error("Failed to start connection");
     } finally {
-      setActionPending(false);
-    }
-  }
-
-  async function handleDisconnect() {
-    setActionPending(true);
-    try {
-      await disconnectWhatsApp();
-      setConnectionState("disconnected");
-      toast.success("Disconnected from WhatsApp");
-    } catch {
-      toast.error("Failed to disconnect");
-    } finally {
-      setActionPending(false);
+      setConnectPending(false);
     }
   }
 
@@ -770,8 +767,7 @@ export function CheckerPage() {
             state={connectionState}
             qr={qrCode}
             onConnect={handleConnect}
-            onDisconnect={handleDisconnect}
-            connecting={actionPending || connectionState === "connecting"}
+            connecting={connectPending || connectionState === "connecting"}
           />
         )}
 

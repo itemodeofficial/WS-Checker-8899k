@@ -43,12 +43,6 @@ export async function connectWhatsApp(): Promise<{ message: string; connection: 
   return res.json();
 }
 
-export async function disconnectWhatsApp(): Promise<{ message: string; connection: string }> {
-  const res = await fetch(`${BASE}/disconnect`, { method: "POST" });
-  if (!res.ok) throw new Error("Failed to disconnect");
-  return res.json();
-}
-
 export async function checkNumbers(numbers: string[]): Promise<CheckSession & { connection?: ConnectionState; qr?: string | null }> {
   const res = await fetch(`${BASE}/check`, {
     method: "POST",
