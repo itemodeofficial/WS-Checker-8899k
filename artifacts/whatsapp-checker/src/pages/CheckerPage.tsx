@@ -669,24 +669,32 @@ export function CheckerPage() {
 
   const queryClient = useQueryClient();
 
-  // Bootstrap with HTTP fetch, then switch to SSE for realtime updates
+  // Bootstrap with HTTP fetch, then switch to SSE for realtime updates.
+  // A polling fallback runs every 8s while not connected, so the QR always
+  // appears even if the SSE connection is dropped or buffered by a proxy.
   useEffect(() => {
-    let cleanup: (() => void) | null = null;
+    let sseCleanup: (() => void) | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-    getStatus()
-      .then((s) => {
-        setConnectionState(s.connection);
-        setQrCode(s.qr);
-      })
-      .catch(() => {})
-      .finally(() => {
-        cleanup = createStatusEventSource((s: WAStatus) => {
-          setConnectionState(s.connection);
-          setQrCode(s.qr);
-        });
-      });
+    function applyStatus(s: WAStatus) {
+      setConnectionState(s.connection);
+      setQrCode(s.qr);
+    }
 
-    return () => cleanup?.();
+    async function poll() {
+      try { applyStatus(await getStatus()); } catch (_) {}
+    }
+
+    poll().finally(() => {
+      sseCleanup = createStatusEventSource(applyStatus);
+      // Polling fallback: keeps the QR fresh even when SSE is unreliable
+      pollTimer = setInterval(poll, 8000);
+    });
+
+    return () => {
+      sseCleanup?.();
+      if (pollTimer) clearInterval(pollTimer);
+    };
   }, []);
 
   const { data: history = [] } = useQuery({

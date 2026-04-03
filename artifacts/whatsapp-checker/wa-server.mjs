@@ -221,12 +221,16 @@ async function startWhatsApp() {
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
+      // connectionReplaced (440) = another session took over these credentials.
+      // Retrying with the same creds just produces another 440 loop, so treat it
+      // like a logout: wipe auth and re-show the QR code.
+      const connectionReplaced = statusCode === DisconnectReason.connectionReplaced;
 
       waClient = null;
-      console.log(`[WA] Connection closed — status: ${statusCode ?? "unknown"}, loggedOut: ${loggedOut}`);
+      console.log(`[WA] Connection closed — status: ${statusCode ?? "unknown"}, loggedOut: ${loggedOut}, replaced: ${connectionReplaced}`);
 
-      if (loggedOut) {
-        // Explicitly revoked from phone: clear creds and show fresh QR
+      if (loggedOut || connectionReplaced) {
+        // Session invalid — clear credentials and show a fresh QR
         await clearAuthAndReconnect();
         return;
       }
