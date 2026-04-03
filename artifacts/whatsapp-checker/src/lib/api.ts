@@ -37,6 +37,18 @@ export async function getStatus(): Promise<WAStatus> {
   return res.json();
 }
 
+export async function connectWhatsApp(): Promise<{ message: string; connection: string }> {
+  const res = await fetch(`${BASE}/connect`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to connect");
+  return res.json();
+}
+
+export async function disconnectWhatsApp(): Promise<{ message: string; connection: string }> {
+  const res = await fetch(`${BASE}/disconnect`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to disconnect");
+  return res.json();
+}
+
 export async function checkNumbers(numbers: string[]): Promise<CheckSession & { connection?: ConnectionState; qr?: string | null }> {
   const res = await fetch(`${BASE}/check`, {
     method: "POST",
@@ -69,4 +81,18 @@ export async function getStats(): Promise<Stats> {
   const res = await fetch(`${BASE}/stats`);
   if (!res.ok) throw new Error("Failed to fetch stats");
   return res.json();
+}
+
+export function createStatusEventSource(onStatus: (status: WAStatus) => void): () => void {
+  const es = new EventSource(`${BASE}/events`);
+  es.addEventListener("status", (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data);
+      onStatus(data);
+    } catch (_) {}
+  });
+  es.onerror = () => {
+    // SSE will auto-reconnect; no action needed
+  };
+  return () => es.close();
 }
