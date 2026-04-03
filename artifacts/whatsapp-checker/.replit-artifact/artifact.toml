@@ -38,6 +38,8 @@ kind = "web"
   [services.development]
   run = "node wa-server.mjs"
 
+  [services.production]
+  run = "node wa-server.mjs"
+
   [services.env]
   PYTHON_PORT = "5000"
-  
