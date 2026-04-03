@@ -122,6 +122,42 @@ function rowToResult(row) {
   };
 }
 
+// ─── Telegram Notifications ───────────────────────────────────────────────────
+
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "6728122351";
+const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`;
+
+// Rate-limit: don't send the same alert more than once every 60s
+const tgLastSent = new Map();
+
+async function tgSend(message, key = null) {
+  if (!TG_TOKEN) return; // skip if not configured
+  if (key) {
+    const last = tgLastSent.get(key) || 0;
+    if (Date.now() - last < 60_000) return; // throttle
+    tgLastSent.set(key, Date.now());
+  }
+  try {
+    const body = JSON.stringify({
+      chat_id: TG_CHAT_ID,
+      text: message,
+      parse_mode: "HTML",
+    });
+    const res = await fetch(`${TG_API}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`[TG] Send failed: ${err}`);
+    }
+  } catch (e) {
+    console.error(`[TG] Error sending message: ${e.message}`);
+  }
+}
+
 // ─── Connection state ─────────────────────────────────────────────────────────
 
 let waClient = null;
@@ -206,12 +242,25 @@ async function startWhatsApp() {
       const qrDataUrl = await QRCode.toDataURL(qr);
       setConnectionState("qr", qrDataUrl);
       console.log("[WA] QR code ready — scan with your phone to link the account");
+      tgSend(
+        "⚠️ <b>WhatsApp Checker — QR Code প্রয়োজন</b>\n\n" +
+        "WhatsApp একাউন্ট লিঙ্ক করতে QR code স্ক্যান করুন।\n" +
+        "অ্যাপ খুলুন এবং QR code স্ক্যান করুন।\n\n" +
+        "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
+        "qr"
+      );
     }
 
     if (connection === "open") {
       lastOpenTime = Date.now();
       console.log("[WA] Connected successfully");
       setConnectionState("connected");
+      tgSend(
+        "✅ <b>WhatsApp Checker — সংযুক্ত হয়েছে</b>\n\n" +
+        "WhatsApp সফলভাবে কানেক্ট হয়েছে এবং সার্ভিস চালু আছে।\n\n" +
+        "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
+        "connected"
+      );
       // Reset cycle counter only after staying connected for 30s
       setTimeout(() => {
         if (connectionState === "connected") rapidCycleCount = 0;
@@ -228,6 +277,20 @@ async function startWhatsApp() {
 
       waClient = null;
       console.log(`[WA] Connection closed — status: ${statusCode ?? "unknown"}, loggedOut: ${loggedOut}, replaced: ${connectionReplaced}`);
+
+      const reason = loggedOut
+        ? "অ্যাকাউন্ট লগআউট হয়েছে (ফোন থেকে সেশন বাতিল)"
+        : connectionReplaced
+        ? "অন্য ডিভাইস থেকে লগইন হওয়ায় সেশন বাতিল হয়েছে (কোড 440)"
+        : `অজানা কারণ (কোড: ${statusCode ?? "N/A"})`;
+
+      tgSend(
+        "🔴 <b>WhatsApp Checker — সংযোগ বিচ্ছিন্ন হয়েছে</b>\n\n" +
+        `❌ কারণ: ${reason}\n` +
+        "🔄 স্বয়ংক্রিয়ভাবে পুনরায় সংযোগ করার চেষ্টা হচ্ছে…\n\n" +
+        "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
+        "disconnected"
+      );
 
       if (loggedOut || connectionReplaced) {
         // Session invalid — clear credentials and show a fresh QR
@@ -401,9 +464,24 @@ app.post("/api/check", async (req, res) => {
     } catch (err) {
       results.push({ number: String(raw), formattedNumber: `+${digits}`, hasWhatsapp: false, error: "Could not determine (network issue)" });
       withoutWA++;
+      console.error(`[CHECK] Error checking +${digits}:`, err.message);
     }
 
     await new Promise((r) => setTimeout(r, 300));
+  }
+
+  const errorCount = results.filter((r) => r.error).length;
+  if (errorCount > 0) {
+    tgSend(
+      "⚠️ <b>WhatsApp Checker — চেকিং সমস্যা</b>\n\n" +
+      `📋 মোট নম্বর: ${numbers.length}\n` +
+      `✅ WhatsApp আছে: ${withWA}\n` +
+      `❌ WhatsApp নেই: ${withoutWA - errorCount}\n` +
+      `⚠️ নেটওয়ার্ক সমস্যা: ${errorCount}\n\n` +
+      "কিছু নম্বর চেক করা যায়নি (নেটওয়ার্ক ইস্যু)।\n\n" +
+      "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
+      "check_error"
+    );
   }
 
   const session = saveSession(results, withWA, withoutWA);
@@ -463,4 +541,10 @@ if (existsSync(distDir)) {
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[API] WhatsApp checker server running on port ${PORT}`);
+  tgSend(
+    "🚀 <b>WhatsApp Checker — সার্ভার চালু হয়েছে</b>\n\n" +
+    `পোর্ট: ${PORT}\n` +
+    "WhatsApp সংযোগ শুরু হচ্ছে…\n\n" +
+    "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
+  );
 });
