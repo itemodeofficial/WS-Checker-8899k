@@ -44,6 +44,12 @@ export async function connectWhatsApp(): Promise<{ message: string; connection: 
   return res.json();
 }
 
+export async function forceQR(): Promise<{ message: string; connection: string }> {
+  const res = await fetch(`${BASE}/force-qr`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to force QR");
+  return res.json();
+}
+
 export async function checkNumbers(numbers: string[]): Promise<CheckSession & { connection?: ConnectionState; qrVersion?: number }> {
   const res = await fetch(`${BASE}/check`, {
     method: "POST",

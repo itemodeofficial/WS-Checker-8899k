@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from "react";
+import { QrCode, RefreshCw } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   checkNumbers,
   connectWhatsApp,
+  forceQR,
   getHistory,
   getStats,
   getSession,
@@ -672,6 +674,7 @@ export function CheckerPage() {
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [qrVersion, setQrVersion] = useState<number>(0);
   const [connectPending, setConnectPending] = useState(false);
+  const [forceQrPending, setForceQrPending] = useState(false);
 
   const queryClient = useQueryClient();
 
@@ -751,6 +754,19 @@ export function CheckerPage() {
     }
   }
 
+  async function handleForceQR() {
+    setForceQrPending(true);
+    try {
+      await forceQR();
+      setConnectionState("connecting");
+      toast.success("Generating fresh QR code…");
+    } catch {
+      toast.error("Failed to generate QR code");
+    } finally {
+      setForceQrPending(false);
+    }
+  }
+
   function handleCheck() {
     const lines = input.split(/[\n,;]+/).map((l) => l.trim()).filter(Boolean);
     if (lines.length === 0) { toast.error("Please enter at least one phone number"); return; }
@@ -819,6 +835,20 @@ export function CheckerPage() {
             <span className={cn("w-1.5 h-1.5 rounded-full", statusDot)} />
             {statusLabel}
           </div>
+          {/* Force-generate a new QR code (wipes session, forces fresh scan) */}
+          <button
+            onClick={handleForceQR}
+            disabled={forceQrPending}
+            title="Force generate new QR code"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-white text-foreground hover:bg-accent hover:border-primary/40 active:scale-95 transition-all disabled:opacity-50 shrink-0"
+          >
+            {forceQrPending ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <QrCode className="w-3.5 h-3.5" />
+            )}
+            New QR
+          </button>
         </div>
 
         {/* Tabs */}

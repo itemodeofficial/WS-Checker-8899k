@@ -400,6 +400,19 @@ app.get("/api/qr", (req, res) => {
   res.send(buf);
 });
 
+// ─── Force fresh QR (wipes auth + restarts session) ──────────────────────────
+
+app.post("/api/force-qr", async (req, res) => {
+  console.log("[WA] Force-QR requested by user — wiping auth and regenerating");
+  if (waClient) {
+    try { await waClient.end(); } catch (_) {}
+    waClient = null;
+  }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  await clearAuthAndReconnect();
+  res.json({ message: "Fresh QR incoming…", connection: "connecting" });
+});
+
 // ─── Connect (manual trigger) ─────────────────────────────────────────────────
 
 app.post("/api/connect", async (req, res) => {
