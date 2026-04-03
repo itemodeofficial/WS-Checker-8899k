@@ -3,13 +3,15 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: WhatsApp Number Checker API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: whatsapp
+    description: WhatsApp number checking operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,89 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /whatsapp/check:
+    post:
+      operationId: checkNumbers
+      tags: [whatsapp]
+      summary: Check WhatsApp numbers
+      description: Check which phone numbers have WhatsApp accounts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckNumbersBody"
+      responses:
+        "200":
+          description: Check results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckNumbersResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /whatsapp/history:
+    get:
+      operationId: getCheckHistory
+      tags: [whatsapp]
+      summary: Get check history
+      description: Get the history of all previous number checks
+      responses:
+        "200":
+          description: Check history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CheckSession"
+
+  /whatsapp/history/{id}:
+    get:
+      operationId: getCheckSession
+      tags: [whatsapp]
+      summary: Get a specific check session
+      description: Get results of a specific number check session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Check session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckSessionDetail"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /whatsapp/stats:
+    get:
+      operationId: getStats
+      tags: [whatsapp]
+      summary: Get overall stats
+      description: Get overall statistics across all checks
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Stats"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +119,127 @@ components:
       required:
         - status
 
+    CheckNumbersBody:
+      type: object
+      properties:
+        numbers:
+          type: array
+          items:
+            type: string
+          description: List of phone numbers to check (with country code, e.g. +1234567890)
+      required:
+        - numbers
+
+    NumberResult:
+      type: object
+      properties:
+        number:
+          type: string
+        hasWhatsapp:
+          type: boolean
+        formattedNumber:
+          type: string
+        error:
+          type: ["string", "null"]
+      required:
+        - number
+        - hasWhatsapp
+        - formattedNumber
+
+    CheckNumbersResponse:
+      type: object
+      properties:
+        sessionId:
+          type: integer
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/NumberResult"
+        total:
+          type: integer
+        withWhatsapp:
+          type: integer
+        withoutWhatsapp:
+          type: integer
+        checkedAt:
+          type: string
+      required:
+        - sessionId
+        - results
+        - total
+        - withWhatsapp
+        - withoutWhatsapp
+        - checkedAt
+
+    CheckSession:
+      type: object
+      properties:
+        id:
+          type: integer
+        total:
+          type: integer
+        withWhatsapp:
+          type: integer
+        withoutWhatsapp:
+          type: integer
+        checkedAt:
+          type: string
+      required:
+        - id
+        - total
+        - withWhatsapp
+        - withoutWhatsapp
+        - checkedAt
+
+    CheckSessionDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+        total:
+          type: integer
+        withWhatsapp:
+          type: integer
+        withoutWhatsapp:
+          type: integer
+        checkedAt:
+          type: string
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/NumberResult"
+      required:
+        - id
+        - total
+        - withWhatsapp
+        - withoutWhatsapp
+        - checkedAt
+        - results
+
+    Stats:
+      type: object
+      properties:
+        totalChecks:
+          type: integer
+        totalNumbersChecked:
+          type: integer
+        totalWithWhatsapp:
+          type: integer
+        totalWithoutWhatsapp:
+          type: integer
+        successRate:
+          type: number
+      required:
+        - totalChecks
+        - totalNumbersChecked
+        - totalWithWhatsapp
+        - totalWithoutWhatsapp
+        - successRate
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error

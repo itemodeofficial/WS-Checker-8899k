@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
-  status: string;
+export interface CheckNumbersBody {
+  /** List of phone numbers to check (with country code, e.g. +1234567890) */
+  numbers: string[];
 }
