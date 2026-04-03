@@ -308,7 +308,50 @@ app.post("/api/connect", async (req, res) => {
   res.json({ message: "Connecting…", connection: "connecting" });
 });
 
-// ─── Check ────────────────────────────────────────────────────────────────────
+// ─── Check (single number via GET) ───────────────────────────────────────────
+
+app.get("/api/check/:number", async (req, res) => {
+  if (connectionState !== "connected" || !waClient) {
+    return res.status(503).json({
+      error: "WhatsApp not connected. Please scan the QR code first.",
+      connection: connectionState,
+      qr: connectionState === "qr" ? qrCode : null,
+    });
+  }
+
+  const raw = decodeURIComponent(req.params.number);
+  const number = raw.trim().replace(/[\s\-\(\)]/g, "");
+  const digits = number.replace(/^\+/, "");
+
+  if (!digits || digits.length < 7) {
+    return res.status(400).json({
+      number: raw,
+      formattedNumber: raw,
+      hasWhatsapp: false,
+      error: "Invalid number format",
+    });
+  }
+
+  try {
+    const [result] = await waClient.onWhatsApp(digits);
+    const hasWhatsapp = result?.exists === true;
+    return res.json({
+      number: raw,
+      formattedNumber: `+${digits}`,
+      hasWhatsapp,
+      error: null,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      number: raw,
+      formattedNumber: `+${digits}`,
+      hasWhatsapp: false,
+      error: "Could not determine (network issue)",
+    });
+  }
+});
+
+// ─── Check (batch via POST) ───────────────────────────────────────────────────
 
 app.post("/api/check", async (req, res) => {
   if (connectionState !== "connected" || !waClient) {

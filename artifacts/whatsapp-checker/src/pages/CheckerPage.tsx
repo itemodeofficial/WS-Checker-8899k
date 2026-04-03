@@ -306,12 +306,77 @@ session.results.forEach(r => {
 });`} />
       </div>
 
-      {/* POST /api/check — the main endpoint */}
+      {/* GET /api/check/:number — single check */}
+      <DocSection
+        method="GET"
+        path="/api/check/:number"
+        badge="Single check"
+        description="Check one phone number directly in the URL. Great for quick lookups, browser testing, or simple integrations. Include the country code (with or without the leading +)."
+      >
+        <div>
+          <Label>URL parameter</Label>
+          <SchemaTable rows={[
+            { field: ":number", type: "string", note: "Phone number in E.164 format, e.g. +13124464775 or 13124464775. URL-encode the + as %2B if needed." },
+          ]} />
+        </div>
+        <div>
+          <Label>Response schema</Label>
+          <SchemaTable rows={[
+            { field: "number", type: "string", note: "The original value from the URL." },
+            { field: "formattedNumber", type: "string", note: "Normalized E.164 form used for the lookup." },
+            { field: "hasWhatsapp", type: "boolean", note: "true if the number is registered on WhatsApp." },
+            { field: "error", type: "string | null", note: "null on success. An error message if the lookup failed." },
+          ]} />
+        </div>
+        <div>
+          <Label>Success response (200)</Label>
+          <CodeBlock code={`{
+  "number": "+13124464775",
+  "formattedNumber": "+13124464775",
+  "hasWhatsapp": true,
+  "error": null
+}`} />
+        </div>
+        <div className="space-y-2">
+          <Label>Error responses</Label>
+          <ErrorRow status={400} condition="number too short or malformed" body={`{ "number": "abc", "formattedNumber": "abc", "hasWhatsapp": false, "error": "Invalid number format" }`} />
+          <ErrorRow status={503} condition="WhatsApp not connected" body={`{ "error": "WhatsApp not connected. Please scan the QR code first.", "connection": "qr" }`} />
+        </div>
+        <div className="space-y-3">
+          <Label>Code examples</Label>
+          <div>
+            <p className="text-xs text-muted-foreground mb-1">Browser / cURL</p>
+            <CodeBlock code={`curl "https://your-domain/api/check/%2B13124464775"
+
+# Or without encoding the +
+curl "https://your-domain/api/check/13124464775"`} />
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground mb-1">JavaScript</p>
+            <CodeBlock code={`const number = '+13124464775';
+const res = await fetch('/api/check/' + encodeURIComponent(number));
+const { formattedNumber, hasWhatsapp } = await res.json();
+console.log(formattedNumber, hasWhatsapp ? '✓ has WhatsApp' : '✗ no WhatsApp');`} />
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground mb-1">Python</p>
+            <CodeBlock code={`import requests
+from urllib.parse import quote
+
+number = '+13124464775'
+r = requests.get(f'https://your-domain/api/check/{quote(number)}')
+data = r.json()
+print(data['formattedNumber'], '✓' if data['hasWhatsapp'] else '✗')`} />
+          </div>
+        </div>
+      </DocSection>
+
+      {/* POST /api/check — batch */}
       <DocSection
         method="POST"
         path="/api/check"
-        badge="Main endpoint"
-        description="Check whether phone numbers are registered on WhatsApp. The server must be in 'connected' state. Include country code in every number. Up to 100 numbers per call."
+        badge="Batch (up to 100)"
+        description="Check multiple phone numbers in one request. The server must be in 'connected' state. Include country code in every number. Up to 100 numbers per call. Results are saved to the database."
       >
         <div>
           <Label>Request body</Label>
