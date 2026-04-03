@@ -26,6 +26,8 @@ if (!basePath) {
   );
 }
 
+const pythonPort = process.env.PYTHON_PORT || "5000";
+
 export default defineConfig({
   base: basePath,
   plugins: [
@@ -62,6 +64,12 @@ export default defineConfig({
     port,
     host: "0.0.0.0",
     allowedHosts: true,
+    proxy: {
+      "/api": {
+        target: `http://localhost:${pythonPort}`,
+        changeOrigin: true,
+      },
+    },
     fs: {
       strict: true,
       deny: ["**/.*"],
