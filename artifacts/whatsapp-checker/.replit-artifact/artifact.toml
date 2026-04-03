@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "WhatsApp Checker"
+version = "1.0.0"
+id = "artifacts/whatsapp-checker"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23059
+
+[services.development]
+run = "pnpm --filter @workspace/whatsapp-checker run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/whatsapp-checker", "run", "build" ]
+publicDir = "artifacts/whatsapp-checker/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23059"
+BASE_PATH = "/"
