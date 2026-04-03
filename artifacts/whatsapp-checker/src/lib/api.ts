@@ -77,16 +77,47 @@ export async function getStats(): Promise<Stats> {
   return res.json();
 }
 
+/**
+ * Creates a Server-Sent Events connection for real-time status updates.
+ *
+ * Debounce strategy:
+ *  - "connected" and "qr" are applied immediately (user needs to see these ASAP).
+ *  - "connecting" / "disconnected" / "logged_out" are debounced 1200ms so that a
+ *    brief open→close cycle on the backend doesn't flicker the banner.
+ */
 export function createStatusEventSource(onStatus: (status: WAStatus) => void): () => void {
   const es = new EventSource(`${BASE}/events`);
+
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function handleStatus(status: WAStatus) {
+    // Important states → apply immediately, cancel any pending debounce
+    if (status.connection === "connected" || status.connection === "qr") {
+      if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+      onStatus(status);
+      return;
+    }
+
+    // Transient states → debounce so rapid cycling doesn't flash the UI
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      onStatus(status);
+    }, 1200);
+  }
+
   es.addEventListener("status", (e: MessageEvent) => {
     try {
-      const data = JSON.parse(e.data);
-      onStatus(data);
+      handleStatus(JSON.parse(e.data));
     } catch (_) {}
   });
+
   es.onerror = () => {
-    // SSE will auto-reconnect; no action needed
+    // EventSource will auto-reconnect; no action needed
   };
-  return () => es.close();
+
+  return () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    es.close();
+  };
 }

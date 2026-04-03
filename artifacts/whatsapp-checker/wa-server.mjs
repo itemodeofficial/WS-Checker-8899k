@@ -14,15 +14,126 @@ app.use(express.json());
 
 const PORT = parseInt(process.env.PYTHON_PORT || "5000", 10);
 const AUTH_DIR = join(__dirname, ".wa-auth");
+const DB_PATH = join(__dirname, ".wa-data", "checker.db");
 
 if (!existsSync(AUTH_DIR)) mkdirSync(AUTH_DIR, { recursive: true });
+mkdirSync(join(__dirname, ".wa-data"), { recursive: true });
+
+// ─── SQLite Database ──────────────────────────────────────────────────────────
+
+const Database = require("better-sqlite3");
+const db = new Database(DB_PATH);
+
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sessions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    total      INTEGER NOT NULL DEFAULT 0,
+    with_wa    INTEGER NOT NULL DEFAULT 0,
+    without_wa INTEGER NOT NULL DEFAULT 0,
+    checked_at TEXT    NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS results (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    number           TEXT NOT NULL,
+    formatted_number TEXT NOT NULL,
+    has_whatsapp     INTEGER NOT NULL DEFAULT 0,
+    error            TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_results_session ON results(session_id);
+`);
+
+const stmts = {
+  insertSession: db.prepare(
+    "INSERT INTO sessions (total, with_wa, without_wa, checked_at) VALUES (?, ?, ?, ?)"
+  ),
+  insertResult: db.prepare(
+    "INSERT INTO results (session_id, number, formatted_number, has_whatsapp, error) VALUES (?, ?, ?, ?, ?)"
+  ),
+  listSessions: db.prepare(
+    "SELECT id, total, with_wa, without_wa, checked_at FROM sessions ORDER BY id DESC"
+  ),
+  getSession: db.prepare(
+    "SELECT id, total, with_wa, without_wa, checked_at FROM sessions WHERE id = ?"
+  ),
+  getResults: db.prepare(
+    "SELECT number, formatted_number, has_whatsapp, error FROM results WHERE session_id = ? ORDER BY id"
+  ),
+  stats: db.prepare(`
+    SELECT
+      COUNT(*)            AS total_checks,
+      COALESCE(SUM(total), 0)      AS total_numbers,
+      COALESCE(SUM(with_wa), 0)    AS total_with,
+      COALESCE(SUM(without_wa), 0) AS total_without
+    FROM sessions
+  `),
+};
+
+function saveSession(results, withWA, withoutWA) {
+  const checkedAt = new Date().toISOString();
+  const info = stmts.insertSession.run(results.length, withWA, withoutWA, checkedAt);
+  const sessionId = info.lastInsertRowid;
+
+  const insertMany = db.transaction((rows) => {
+    for (const r of rows) {
+      stmts.insertResult.run(
+        sessionId,
+        r.number,
+        r.formattedNumber,
+        r.hasWhatsapp ? 1 : 0,
+        r.error ?? null
+      );
+    }
+  });
+  insertMany(results);
+
+  return {
+    id: Number(sessionId),
+    total: results.length,
+    withWhatsapp: withWA,
+    withoutWhatsapp: withoutWA,
+    checkedAt,
+    results,
+  };
+}
+
+function rowToSession(row) {
+  return {
+    id: row.id,
+    total: row.total,
+    withWhatsapp: row.with_wa,
+    withoutWhatsapp: row.without_wa,
+    checkedAt: row.checked_at,
+  };
+}
+
+function rowToResult(row) {
+  return {
+    number: row.number,
+    formattedNumber: row.formatted_number,
+    hasWhatsapp: row.has_whatsapp === 1,
+    error: row.error ?? null,
+  };
+}
+
+// ─── Connection state ─────────────────────────────────────────────────────────
 
 let waClient = null;
 let qrCode = null;
 let connectionState = "disconnected";
-let checkHistory = [];
-let sessionCounter = 0;
 let sseClients = new Set();
+
+// Rapid-cycle detection: track how many times we open→close in under RAPID_MS
+const RAPID_MS = 8000;
+const MAX_RAPID_CYCLES = 3;
+let rapidCycleCount = 0;
+let lastOpenTime = 0;
+let reconnectTimer = null;
 
 function broadcast(event, data) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -35,6 +146,24 @@ function setConnectionState(state, qr = null) {
   connectionState = state;
   qrCode = qr;
   broadcast("status", { connection: state, qr });
+}
+
+function scheduleReconnect(delay = 2500) {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    startWhatsApp().catch(console.error);
+  }, delay);
+}
+
+async function clearAuthAndReconnect() {
+  console.log("[WA] Stale session detected — clearing credentials for fresh QR scan");
+  const { rmSync } = await import("fs");
+  try { rmSync(AUTH_DIR, { recursive: true, force: true }); } catch (_) {}
+  mkdirSync(AUTH_DIR, { recursive: true });
+  rapidCycleCount = 0;
+  setConnectionState("qr");
+  scheduleReconnect(1000);
 }
 
 async function startWhatsApp() {
@@ -75,28 +204,48 @@ async function startWhatsApp() {
       const QRCode = await import("qrcode");
       const qrDataUrl = await QRCode.toDataURL(qr);
       setConnectionState("qr", qrDataUrl);
-      console.log("[WA] QR code ready — scan to authenticate");
+      console.log("[WA] QR code ready — scan with your phone to link the account");
+    }
+
+    if (connection === "open") {
+      lastOpenTime = Date.now();
+      console.log("[WA] Connected successfully");
+      setConnectionState("connected");
+      // Reset cycle counter only after staying connected for 30s
+      setTimeout(() => {
+        if (connectionState === "connected") rapidCycleCount = 0;
+      }, 30000);
     }
 
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
-      console.log("[WA] Connection closed. LoggedOut:", loggedOut, "— reconnecting…");
-      waClient = null;
-      if (loggedOut) {
-        // Session was revoked from the phone — clear stale creds then reconnect for a fresh QR
-        const { rmSync } = await import("fs");
-        try { rmSync(AUTH_DIR, { recursive: true, force: true }); } catch (_) {}
-        mkdirSync(AUTH_DIR, { recursive: true });
-      }
-      // Always reconnect — never stay permanently disconnected
-      setConnectionState("connecting");
-      setTimeout(startWhatsApp, 2500);
-    }
 
-    if (connection === "open") {
-      console.log("[WA] Connected successfully");
-      setConnectionState("connected");
+      waClient = null;
+      console.log(`[WA] Connection closed — status: ${statusCode ?? "unknown"}, loggedOut: ${loggedOut}`);
+
+      if (loggedOut) {
+        // Explicitly revoked from phone: clear creds and show fresh QR
+        await clearAuthAndReconnect();
+        return;
+      }
+
+      // Detect rapid open→close cycle (stale/invalid session)
+      const timeSinceOpen = Date.now() - lastOpenTime;
+      if (lastOpenTime > 0 && timeSinceOpen < RAPID_MS) {
+        rapidCycleCount++;
+        console.log(`[WA] Rapid cycle #${rapidCycleCount} (closed ${timeSinceOpen}ms after open)`);
+        if (rapidCycleCount >= MAX_RAPID_CYCLES) {
+          await clearAuthAndReconnect();
+          return;
+        }
+      }
+
+      // Normal closure — reconnect with back-off
+      const delay = rapidCycleCount > 0 ? 5000 + rapidCycleCount * 2000 : 2500;
+      setConnectionState("connecting");
+      console.log(`[WA] Reconnecting in ${delay}ms…`);
+      scheduleReconnect(delay);
     }
   });
 
@@ -107,7 +256,7 @@ async function startWhatsApp() {
 
 startWhatsApp().catch(console.error);
 
-// ─── SSE ────────────────────────────────────────────────────────────────────
+// ─── SSE ──────────────────────────────────────────────────────────────────────
 
 app.get("/api/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
@@ -115,10 +264,8 @@ app.get("/api/events", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  // Send current state immediately on connect
   res.write(`event: status\ndata: ${JSON.stringify({ connection: connectionState, qr: qrCode })}\n\n`);
 
-  // Keep-alive ping every 20s
   const ping = setInterval(() => {
     try { res.write(": ping\n\n"); } catch (_) { clearInterval(ping); }
   }, 20000);
@@ -131,7 +278,7 @@ app.get("/api/events", (req, res) => {
   });
 });
 
-// ─── Status ─────────────────────────────────────────────────────────────────
+// ─── Status & Health ──────────────────────────────────────────────────────────
 
 app.get("/api/healthz", (req, res) => {
   res.json({ status: "ok", connection: connectionState });
@@ -144,7 +291,7 @@ app.get("/api/status", (req, res) => {
   });
 });
 
-// ─── Connect (manual trigger) ────────────────────────────────────────────────
+// ─── Connect (manual trigger) ─────────────────────────────────────────────────
 
 app.post("/api/connect", async (req, res) => {
   if (connectionState === "connected") {
@@ -154,12 +301,14 @@ app.post("/api/connect", async (req, res) => {
     try { await waClient.end(); } catch (_) {}
     waClient = null;
   }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  rapidCycleCount = 0;
   setConnectionState("connecting");
   startWhatsApp().catch(console.error);
   res.json({ message: "Connecting…", connection: "connecting" });
 });
 
-// ─── Check ───────────────────────────────────────────────────────────────────
+// ─── Check ────────────────────────────────────────────────────────────────────
 
 app.post("/api/check", async (req, res) => {
   if (connectionState !== "connected" || !waClient) {
@@ -179,21 +328,16 @@ app.post("/api/check", async (req, res) => {
   }
 
   const results = [];
-  let withWhatsapp = 0;
-  let withoutWhatsapp = 0;
+  let withWA = 0;
+  let withoutWA = 0;
 
   for (const raw of numbers) {
     const number = String(raw).trim().replace(/[\s\-\(\)]/g, "");
     const digits = number.replace(/^\+/, "");
 
     if (!digits || digits.length < 7) {
-      results.push({
-        number: String(raw),
-        formattedNumber: String(raw),
-        hasWhatsapp: false,
-        error: "Invalid number format",
-      });
-      withoutWhatsapp++;
+      results.push({ number: String(raw), formattedNumber: String(raw), hasWhatsapp: false, error: "Invalid number format" });
+      withoutWA++;
       continue;
     }
 
@@ -201,195 +345,57 @@ app.post("/api/check", async (req, res) => {
       const [result] = await waClient.onWhatsApp(digits);
       if (result?.exists) {
         results.push({ number: String(raw), formattedNumber: `+${digits}`, hasWhatsapp: true, error: null });
-        withWhatsapp++;
+        withWA++;
       } else {
         results.push({ number: String(raw), formattedNumber: `+${digits}`, hasWhatsapp: false, error: null });
-        withoutWhatsapp++;
+        withoutWA++;
       }
     } catch (err) {
       results.push({ number: String(raw), formattedNumber: `+${digits}`, hasWhatsapp: false, error: "Could not determine (network issue)" });
-      withoutWhatsapp++;
+      withoutWA++;
     }
 
     await new Promise((r) => setTimeout(r, 300));
   }
 
-  sessionCounter++;
-  const session = {
-    id: sessionCounter,
-    total: results.length,
-    withWhatsapp,
-    withoutWhatsapp,
-    checkedAt: new Date().toISOString(),
-    results,
-  };
-  checkHistory.push(session);
+  const session = saveSession(results, withWA, withoutWA);
   res.json(session);
 });
 
-// ─── History ─────────────────────────────────────────────────────────────────
+// ─── History ──────────────────────────────────────────────────────────────────
 
 app.get("/api/history", (req, res) => {
-  const summary = [...checkHistory].reverse().map((s) => ({
-    id: s.id,
-    total: s.total,
-    withWhatsapp: s.withWhatsapp,
-    withoutWhatsapp: s.withoutWhatsapp,
-    checkedAt: s.checkedAt,
-  }));
-  res.json(summary);
+  const rows = stmts.listSessions.all();
+  res.json(rows.map(rowToSession));
 });
 
 app.get("/api/history/:id", (req, res) => {
-  const session = checkHistory.find((s) => s.id === parseInt(req.params.id));
+  const id = parseInt(req.params.id, 10);
+  const session = stmts.getSession.get(id);
   if (!session) return res.status(404).json({ error: "Session not found" });
-  res.json(session);
+  const results = stmts.getResults.all(id).map(rowToResult);
+  res.json({ ...rowToSession(session), results });
 });
 
 // ─── Stats ────────────────────────────────────────────────────────────────────
 
 app.get("/api/stats", (req, res) => {
-  const totalChecks = checkHistory.length;
-  const totalNumbers = checkHistory.reduce((a, s) => a + s.total, 0);
-  const totalWith = checkHistory.reduce((a, s) => a + s.withWhatsapp, 0);
-  const totalWithout = checkHistory.reduce((a, s) => a + s.withoutWhatsapp, 0);
+  const row = stmts.stats.get();
+  const total = Number(row.total_numbers);
+  const withWA = Number(row.total_with);
   res.json({
-    totalChecks,
-    totalNumbersChecked: totalNumbers,
-    totalWithWhatsapp: totalWith,
-    totalWithoutWhatsapp: totalWithout,
-    successRate: totalNumbers > 0 ? Math.round((totalWith / totalNumbers) * 1000) / 10 : 0,
+    totalChecks: Number(row.total_checks),
+    totalNumbersChecked: total,
+    totalWithWhatsapp: withWA,
+    totalWithoutWhatsapp: Number(row.total_without),
+    successRate: total > 0 ? Math.round((withWA / total) * 1000) / 10 : 0,
   });
 });
 
 // ─── API Docs (JSON) ──────────────────────────────────────────────────────────
 
 app.get("/api/docs", (req, res) => {
-  res.json({
-    title: "WhatsApp Number Checker API",
-    version: "1.0.0",
-    baseUrl: "/api",
-    description: "Check whether phone numbers are registered on WhatsApp. Requires a one-time QR scan to link your WhatsApp account. The session persists automatically — no repeated logins needed.",
-    note: "All requests and responses use JSON. No API key or authentication header required.",
-    connectionLifecycle: {
-      description: "Scan the QR code once. The session is saved and reconnects automatically on server restart or network drop. You only need to re-scan if you remove the linked device from your WhatsApp app.",
-      states: {
-        connecting: "Server is trying to establish a connection using saved credentials.",
-        qr: "No saved session — scan the QR code from GET /api/status to link your account.",
-        connected: "Ready. You can call POST /api/check.",
-        logged_out: "Session was revoked from the phone. A new QR will be generated automatically.",
-      },
-    },
-    endpoints: {
-      "GET /api/status": {
-        description: "Return current connection state and QR code image when needed.",
-        response: {
-          connection: "connecting | qr | connected | logged_out",
-          qr: "base64 PNG data URL, present only when connection === 'qr', otherwise null",
-        },
-        examples: {
-          connected: { connection: "connected", qr: null },
-          needsQR: { connection: "qr", qr: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..." },
-        },
-      },
-      "GET /api/events": {
-        description: "Server-Sent Events stream. Pushes status updates in real time without polling.",
-        usage: "Connect with EventSource. Receives the current state immediately, then on every change.",
-        eventName: "status",
-        payload: { connection: "string", qr: "string | null" },
-        example: {
-          javascript: "const es = new EventSource('/api/events');\nes.addEventListener('status', e => {\n  const { connection, qr } = JSON.parse(e.data);\n});",
-        },
-      },
-      "POST /api/check": {
-        description: "Check whether phone numbers are registered on WhatsApp. The server must be in 'connected' state.",
-        request: {
-          contentType: "application/json",
-          body: {
-            numbers: "string[] — phone numbers in E.164 format or digits only. Country code required. Max 100 per request.",
-          },
-          example: {
-            numbers: ["+12025551234", "+447700900123", "+4915112345678", "5511987654321"],
-          },
-        },
-        response: {
-          id: "number — auto-incrementing session ID",
-          total: "number — how many numbers were submitted",
-          withWhatsapp: "number — count that have WhatsApp",
-          withoutWhatsapp: "number — count that do not have WhatsApp",
-          checkedAt: "ISO 8601 timestamp",
-          results: "array — one entry per number (see NumberResult below)",
-        },
-        numberResult: {
-          number: "string — the original value you submitted",
-          formattedNumber: "string — normalized form used for the lookup (e.g. +12025551234)",
-          hasWhatsapp: "boolean — true if the number is registered on WhatsApp",
-          error: "string | null — null on success; a message if the number was invalid or unreachable",
-        },
-        successExample: {
-          id: 3,
-          total: 3,
-          withWhatsapp: 2,
-          withoutWhatsapp: 1,
-          checkedAt: "2025-06-10T14:22:05.123Z",
-          results: [
-            { number: "+12025551234", formattedNumber: "+12025551234", hasWhatsapp: true, error: null },
-            { number: "+447700900123", formattedNumber: "+447700900123", hasWhatsapp: false, error: null },
-            { number: "bad-number", formattedNumber: "bad-number", hasWhatsapp: false, error: "Invalid number format" },
-          ],
-        },
-        errors: [
-          { status: 400, condition: "numbers field missing or empty", body: { error: "numbers must be a non-empty array" } },
-          { status: 400, condition: "more than 100 numbers submitted", body: { error: "Maximum 100 numbers per request" } },
-          { status: 503, condition: "WhatsApp not yet connected", body: { error: "WhatsApp not connected. Please scan the QR code first.", connection: "qr", qr: "data:image/png;base64,..." } },
-        ],
-      },
-      "GET /api/history": {
-        description: "List all past check sessions, newest first. Returns summaries only (no per-number results).",
-        response: "Array of session objects",
-        sessionObject: {
-          id: "number",
-          total: "number",
-          withWhatsapp: "number",
-          withoutWhatsapp: "number",
-          checkedAt: "ISO 8601 string",
-        },
-        example: [
-          { id: 4, total: 20, withWhatsapp: 15, withoutWhatsapp: 5, checkedAt: "2025-06-10T15:00:00.000Z" },
-          { id: 3, total: 3, withWhatsapp: 2, withoutWhatsapp: 1, checkedAt: "2025-06-10T14:22:05.123Z" },
-        ],
-      },
-      "GET /api/history/:id": {
-        description: "Get the full result of a specific session including per-number results.",
-        urlParam: "id — session ID returned by GET /api/history",
-        response: "Full session object with results array (same shape as POST /api/check response)",
-        errors: [
-          { status: 404, body: { error: "Session not found" } },
-        ],
-      },
-      "GET /api/stats": {
-        description: "Cumulative statistics across all sessions.",
-        response: {
-          totalChecks: "number of sessions run",
-          totalNumbersChecked: "total individual numbers checked across all sessions",
-          totalWithWhatsapp: "number",
-          totalWithoutWhatsapp: "number",
-          successRate: "float — percentage of numbers that have WhatsApp (e.g. 74.5)",
-        },
-        example: {
-          totalChecks: 12,
-          totalNumbersChecked: 847,
-          totalWithWhatsapp: 631,
-          totalWithoutWhatsapp: 216,
-          successRate: 74.5,
-        },
-      },
-      "GET /api/healthz": {
-        description: "Lightweight health check.",
-        response: { status: "ok", connection: "connected" },
-      },
-    },
-  });
+  res.json({ title: "WhatsApp Number Checker API", version: "1.0.0", baseUrl: "/api" });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
