@@ -19,16 +19,12 @@ kind = "web"
 
   [services.production]
   build = [ "pnpm", "--filter", "@workspace/whatsapp-checker", "run", "build" ]
-  publicDir = "artifacts/whatsapp-checker/dist/public"
-  serve = "static"
-
-  [[services.production.rewrites]]
-  from = "/*"
-  to = "/index.html"
+  run = "pnpm --filter @workspace/whatsapp-checker run start"
 
   [services.env]
   PORT = "23059"
   BASE_PATH = "/"
+  PYTHON_PORT = "5000"
 
   [[services]]
   name = "api"
@@ -36,9 +32,6 @@ kind = "web"
   localPort = 5000
 
   [services.development]
-  run = "node wa-server.mjs"
-
-  [services.production]
   run = "node wa-server.mjs"
 
   [services.env]

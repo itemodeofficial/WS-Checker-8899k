@@ -12,7 +12,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = parseInt(process.env.PYTHON_PORT || "5000", 10);
+// In production PORT is injected by the platform; fall back to PYTHON_PORT for dev
+const PORT = parseInt(process.env.PORT || process.env.PYTHON_PORT || "5000", 10);
 const AUTH_DIR = join(__dirname, ".wa-auth");
 const DB_PATH = join(__dirname, ".wa-data", "checker.db");
 
@@ -440,6 +441,19 @@ app.get("/api/stats", (req, res) => {
 app.get("/api/docs", (req, res) => {
   res.json({ title: "WhatsApp Number Checker API", version: "1.0.0", baseUrl: "/api" });
 });
+
+// ─── Static frontend (production) ────────────────────────────────────────────
+// When the Vite build output exists, serve the React app for all non-API routes.
+
+const distDir = join(__dirname, "dist", "public");
+if (existsSync(distDir)) {
+  app.use(express.static(distDir));
+  // SPA fallback — serve index.html for any unmatched route (Express 5 syntax)
+  app.get("/{*path}", (_req, res) => {
+    res.sendFile(join(distDir, "index.html"));
+  });
+  console.log(`[API] Serving static frontend from ${distDir}`);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
