@@ -209,7 +209,6 @@ async function tgSendPhoto(base64Image, caption) {
 }
 
 async function tgLog(message) {
-  // Always send logs (no rate limit) — full visibility
   if (!TG_TOKEN) return;
   try {
     await fetch(`${TG_API}/sendMessage`, {
@@ -220,6 +219,109 @@ async function tgLog(message) {
   } catch (e) {
     console.error(`[TG-LOG] Error: ${e.message}`);
   }
+}
+
+// ─── Telegram Keyboard & Webhook ────────────────────────────────────────────
+
+function tgKeyboard(rows) {
+  return { inline_keyboard: rows };
+}
+
+async function tgSendMenu(text) {
+  if (!TG_TOKEN) return;
+  const kb = tgKeyboard([
+    [{ text: "📊 Status", callback_data: "status" }, { text: "🔗 Connect", callback_data: "connect" }],
+    [{ text: "🔌 Disconnect", callback_data: "disconnect" }, { text: "🔄 QR Code", callback_data: "qr" }],
+    [{ text: "📋 Stats", callback_data: "stats" }, { text: "📁 History", callback_data: "history" }],
+    [{ text: "✅ Check Number", callback_data: "check" }],
+  ]);
+  try {
+    await fetch(`${TG_API}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: TG_CHAT_ID, text, parse_mode: "HTML", reply_markup: kb }),
+    });
+  } catch (e) {
+    console.error(`[TG-MENU] Error: ${e.message}`);
+  }
+}
+
+async function tgAnswerCallback(queryId, text) {
+  if (!TG_TOKEN) return;
+  try {
+    await fetch(`${TG_API}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: queryId, text, show_alert: false }),
+    });
+  } catch (_) {}
+}
+
+async function tgEditMessage(messageId, text, keyboard = null) {
+  if (!TG_TOKEN) return;
+  const body = { chat_id: TG_CHAT_ID, message_id: messageId, text, parse_mode: "HTML" };
+  if (keyboard) body.reply_markup = keyboard;
+  try {
+    await fetch(`${TG_API}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    console.error(`[TG-EDIT] Error: ${e.message}`);
+  }
+}
+
+// Helper: check a single number and return result text
+async function tgCheckNumber(number) {
+  const raw = String(number).trim().replace(/[\s\-\(\)]/g, "");
+  const digits = raw.replace(/^\+/, "");
+  if (!digits || digits.length < 7) return `❌ Invalid number: ${number}`;
+  if (connectionState !== "connected" || !waClient) return `⚠️ WhatsApp not connected. Tap 🔗 Connect first.`;
+  try {
+    const [result] = await waClient.onWhatsApp(digits);
+    const has = result?.exists === true;
+    return has
+      ? `✅ +${digits} → <b>Has WhatsApp</b> \ud83d\udc4d`
+      : `❌ +${digits} → <b>No WhatsApp</b>`;
+  } catch (err) {
+    return `⚠️ +${digits} → Error: ${err.message}`;
+  }
+}
+
+// Helper: batch check numbers from text
+async function tgCheckBatch(text) {
+  const lines = text.split(/\n|,/).map(s => s.trim()).filter(s => s.length > 0);
+  const numbers = lines.slice(0, 50); // max 50 from Telegram
+  if (numbers.length === 0) return "⚠️ No valid numbers found. Send numbers separated by commas or new lines.";
+  if (connectionState !== "connected" || !waClient) return "⚠️ WhatsApp not connected. Tap 🔗 Connect first.";
+
+  let msg = "📋 <b>Batch Check Results</b>\n\n";
+  let hasCount = 0;
+  let noCount = 0;
+
+  for (let i = 0; i < numbers.length; i++) {
+    const raw = numbers[i].replace(/[\s\-\(\)]/g, "");
+    const digits = raw.replace(/^\+/, "");
+    if (!digits || digits.length < 7) {
+      msg += `${i + 1}. ❌ ${numbers[i]} → Invalid\n`;
+      noCount++;
+      continue;
+    }
+    try {
+      const [result] = await waClient.onWhatsApp(digits);
+      const has = result?.exists === true;
+      if (has) { hasCount++; msg += `${i + 1}. ✅ +${digits} → WhatsApp \ud83d\udc4d\n`; }
+      else { noCount++; msg += `${i + 1}. ❌ +${digits} → No WhatsApp\n`; }
+    } catch (err) {
+      msg += `${i + 1}. ⚠️ +${digits} → Error\n`;
+      noCount++;
+    }
+    if (i < numbers.length - 1) await new Promise((r) => setTimeout(r, 300));
+  }
+
+  msg += `\n<b>Summary:</b> ✅ ${hasCount} | ❌ ${noCount} | 📁 Total: ${numbers.length}`;
+  return msg;
 }
 
 // ─── Connection State ─────────────────────────────────────────────────────────
@@ -375,16 +477,16 @@ async function startWhatsApp() {
       console.log(`[WA] Closed — code: ${statusCode ?? "?"}, loggedOut: ${loggedOut}, replaced: ${connectionReplaced}`);
 
       const reason = loggedOut
-        ? "অ্যাকাউন্ট লগআউট"
+        ? "Account logged out"
         : connectionReplaced
-        ? "অন্য ডিভাইস থেকে লগইন (কোড 440)"
-        : `কোড: ${statusCode ?? "N/A"}`;
+        ? "Another device connected (code 440)"
+        : `Code: ${statusCode ?? "N/A"}`;
 
       tgSend(
-        "🔴 <b>WhatsApp Checker — সংযোগ বিচ্ছিন্ন</b>\n\n" +
-        `❌ কারণ: ${reason}\n` +
-        (!manualDisconnect ? "🔄 পুনরায় সংযোগের চেষ্টা হচ্ছে…\n\n" : "") +
-        "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
+        "🔴 <b>WhatsApp Checker — Disconnected</b>\n\n" +
+        `❌ Reason: ${reason}\n` +
+        (!manualDisconnect ? "🔄 Reconnecting…\n\n" : "") +
+        "🕐 " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
         "disconnected"
       );
 
@@ -393,8 +495,23 @@ async function startWhatsApp() {
         return;
       }
 
-      if (loggedOut || connectionReplaced) {
+      if (loggedOut) {
+        // Only clear auth on logout — session completely dead
         await clearAuthAndReconnect();
+        return;
+      }
+
+      if (connectionReplaced) {
+        // Another device connected — DON'T clear auth, session still valid
+        // Just stop reconnecting and let user manually reconnect
+        manualDisconnect = true;
+        setConnectionState("disconnected");
+        tgSend(
+          "⚠️ <b>Another device connected to WhatsApp</b>\n\n" +
+          "Your WhatsApp account was logged in from another device.\n" +
+          "Tap 🔗 Connect to reconnect.\n\n" +
+          "🕐 " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
+        );
         return;
       }
 
@@ -711,15 +828,213 @@ if (existsSync(distDir)) {
   console.log(`[API] Serving static frontend from ${distDir}`);
 }
 
+// ─── Telegram Bot Polling ───────────────────────────────────────────────────
+
+let tgLastUpdateId = 0;
+let tgAwaitingNumbers = false;
+
+async function processTelegramUpdate(update) {
+  const msg = update.message;
+  const cbq = update.callback_query;
+
+  if (msg && msg.text) {
+    const text = msg.text.trim();
+    const chatId = msg.chat.id;
+    if (String(chatId) !== String(TG_CHAT_ID)) {
+      console.log(`[TG] Ignored message from unauthorized chat: ${chatId}`);
+      return;
+    }
+
+    if (text === "/start") {
+      tgAwaitingNumbers = false;
+      tgSendMenu(
+        "👋 <b>Welcome to WhatsApp Checker Bot!</b>\n\n" +
+        "Use the buttons below to control the checker.\n\n" +
+        "🕐 " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
+      );
+      return;
+    }
+
+    if (text === "/status") {
+      tgAwaitingNumbers = false;
+      const status = connectionState === "connected"
+        ? "✅ Connected"
+        : connectionState === "qr"
+        ? "🔄 QR Required"
+        : connectionState === "connecting"
+        ? "🔄 Connecting..."
+        : "❌ Disconnected";
+      tgSendMenu(
+        "📊 <b>Current Status</b>\n\n" +
+        `Connection: ${status}\n` +
+        `Uptime: ${Math.floor(process.uptime())}s\n\n` +
+        "🕐 " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
+      );
+      return;
+    }
+
+    if (text === "/check" || tgAwaitingNumbers) {
+      tgAwaitingNumbers = false;
+      const result = await tgCheckBatch(text === "/check" ? "" : text);
+      tgSend(result);
+      return;
+    }
+
+    tgAwaitingNumbers = false;
+    const result = await tgCheckBatch(text);
+    tgSend(result);
+    return;
+  }
+
+  if (cbq) {
+    const chatId = cbq.message?.chat?.id;
+    if (String(chatId) !== String(TG_CHAT_ID)) return;
+
+    const data = cbq.data;
+    const queryId = cbq.id;
+
+    if (data === "status") {
+      await tgAnswerCallback(queryId, "Getting status...");
+      const status = connectionState === "connected"
+        ? "✅ Connected"
+        : connectionState === "qr"
+        ? "🔄 QR Required"
+        : connectionState === "connecting"
+        ? "🔄 Connecting..."
+        : "❌ Disconnected";
+      tgSendMenu(
+        "📊 <b>Current Status</b>\n\n" +
+        `Connection: ${status}\n` +
+        `Uptime: ${Math.floor(process.uptime())}s\n\n` +
+        "🕐 " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
+      );
+      return;
+    }
+
+    if (data === "connect") {
+      await tgAnswerCallback(queryId, "Connecting...");
+      if (connectionState === "connected") {
+        tgSend("✅ Already connected!");
+        return;
+      }
+      manualDisconnect = false;
+      if (waClient) { try { await waClient.end(); } catch (_) {} waClient = null; }
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      rapidCycleCount = 0;
+      setConnectionState("connecting");
+      startWhatsApp().catch(console.error);
+      tgSend("🔗 <b>Connecting to WhatsApp...</b>\nQR code will appear when ready.");
+      return;
+    }
+
+    if (data === "disconnect") {
+      await tgAnswerCallback(queryId, "Disconnecting...");
+      if (connectionState === "disconnected") {
+        tgSend("❌ Already disconnected!");
+        return;
+      }
+      manualDisconnect = true;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (waClient) { try { await waClient.end(); } catch (_) {} waClient = null; }
+      setConnectionState("disconnected");
+      tgSend("🔌 <b>Disconnected</b>\n\nWhatsApp connection stopped. Tap 🔗 Connect to reconnect.");
+      return;
+    }
+
+    if (data === "qr") {
+      await tgAnswerCallback(queryId, "Generating fresh QR...");
+      manualDisconnect = false;
+      if (waClient) { try { await waClient.end(); } catch (_) {} waClient = null; }
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      await clearAuthAndReconnect();
+      tgSend("🔄 <b>Fresh QR code requested</b>\n\nWait 10-15 seconds for the new QR code...");
+      return;
+    }
+
+    if (data === "stats") {
+      await tgAnswerCallback(queryId, "Getting stats...");
+      const row = stmts.stats.get();
+      const total = Number(row.total_numbers);
+      const withWA = Number(row.total_with);
+      tgSendMenu(
+        "📈 <b>Overall Statistics</b>\n\n" +
+        `📁 Total Sessions: ${Number(row.total_checks)}\n` +
+        `📝 Total Numbers Checked: ${total}\n` +
+        `✅ With WhatsApp: ${withWA}\n` +
+        `❌ Without WhatsApp: ${Number(row.total_without)}\n` +
+        `Success Rate: ${total > 0 ? Math.round((withWA / total) * 1000) / 10 : 0}%\n\n` +
+        "🕐 " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
+      );
+      return;
+    }
+
+    if (data === "history") {
+      await tgAnswerCallback(queryId, "Loading history...");
+      const rows = stmts.listSessions.all();
+      if (rows.length === 0) {
+        tgSend("📁 <b>No history found</b>\n\nNo check sessions yet.");
+        return;
+      }
+      let msg = "📁 <b>Check History</b>\n\n";
+      rows.slice(0, 10).forEach((row) => {
+        msg += `ID #${row.id}: ✅ ${row.with_wa} | ❌ ${row.without_wa} | Total: ${row.total}\n`;
+        msg += `🕐 ${row.checked_at}\n\n`;
+      });
+      tgSend(msg);
+      return;
+    }
+
+    if (data === "check") {
+      await tgAnswerCallback(queryId, "Ready for numbers...");
+      tgAwaitingNumbers = true;
+      tgSend(
+        "✅ <b>Check Numbers</b>\n\n" +
+        "Send phone numbers to check. You can send:\n" +
+        "• One number: +8801234567890\n" +
+        "• Multiple numbers (one per line)\n" +
+        "• Multiple numbers (comma separated)\n\n" +
+        "Max 50 numbers at once."
+      );
+      return;
+    }
+  }
+}
+
+function startTelegramPolling() {
+  if (!TG_TOKEN) return;
+  console.log("[TG] Starting bot polling...");
+
+  async function poll() {
+    try {
+      const resp = await fetch(
+        `${TG_API}/getUpdates?offset=${tgLastUpdateId + 1}&limit=10`
+      );
+      const data = await resp.json();
+      if (data.ok && data.result) {
+        for (const update of data.result) {
+          tgLastUpdateId = Math.max(tgLastUpdateId, update.update_id);
+          await processTelegramUpdate(update);
+        }
+      }
+    } catch (e) {
+      console.error(`[TG-POLL] Error: ${e.message}`);
+    }
+    setTimeout(poll, 5000);
+  }
+
+  poll();
+}
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[API] WhatsApp Checker v2.0 running on port ${PORT} (${IS_PROD ? "production" : "development"})`);
   tgSend(
-    "🚀 <b>WhatsApp Checker — সার্ভার চালু হয়েছে</b>\n\n" +
-    `পোর্ট: ${PORT} | মোড: ${IS_PROD ? "Production" : "Dev"}\n\n` +
-    "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
+    "🚀 <b>WhatsApp Checker — Server Started</b>\n\n" +
+    `Port: ${PORT} | Mode: ${IS_PROD ? "Production" : "Dev"}\n\n` +
+    "🕐 " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
   );
+  startTelegramPolling();
 });
 
 server.keepAliveTimeout = 65000;
