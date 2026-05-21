@@ -293,6 +293,11 @@ async function startWhatsApp() {
       const qrDataUrl = await QRCode.toDataURL(qr, { scale: 12, margin: 2 });
       setConnectionState("qr", qrDataUrl);
       console.log("[WA] QR code ready — scan with your phone");
+      // Print QR in terminal so Termius users can scan directly
+      try {
+        const terminalQR = await QRCode.toString(qr, { type: "terminal", small: true });
+        console.log(terminalQR);
+      } catch (_) {}
       tgSend(
         "⚠️ <b>WhatsApp Checker — QR Code প্রয়োজন</b>\n\n" +
         "WhatsApp একাউন্ট লিঙ্ক করতে QR code স্ক্যান করুন।\n\n" +
