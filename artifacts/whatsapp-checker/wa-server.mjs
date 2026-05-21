@@ -15,8 +15,11 @@ const app = express();
 
 // ─── Security & Performance ───────────────────────────────────────────────────
 
+// Trust proxy headers (needed when behind Nginx or Replit proxy)
+app.set("trust proxy", 1);
+
 app.use(helmet({
-  contentSecurityPolicy: false, // disabled so React app loads fine
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
 }));
 app.use(compression());
