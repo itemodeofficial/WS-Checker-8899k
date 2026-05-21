@@ -267,7 +267,7 @@ async function startWhatsApp() {
   const sock = makeWASocket({
     version,
     logger,
-    printQRInTerminal: false,
+    printQRInTerminal: true,
     browser: Browsers.ubuntu("Chrome"),
     auth: {
       creds: state.creds,
