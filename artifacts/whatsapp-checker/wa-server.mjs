@@ -185,6 +185,44 @@ async function tgSend(message, key = null) {
   }
 }
 
+async function tgSendPhoto(base64Image, caption) {
+  if (!TG_TOKEN || !base64Image) return;
+  try {
+    const base64 = base64Image.replace(/^data:image\/png;base64,/, "");
+    const buf = Buffer.from(base64, "base64");
+    const blob = new (require("buffer").Blob)([buf], { type: "image/png" });
+
+    const form = new FormData();
+    form.append("chat_id", TG_CHAT_ID);
+    form.append("caption", caption);
+    form.append("parse_mode", "HTML");
+    form.append("photo", new File([blob], "qr.png", { type: "image/png" }));
+
+    await fetch(`${TG_API}/sendPhoto`, {
+      method: "POST",
+      body: form,
+    });
+  } catch (e) {
+    console.error(`[TG] Photo send failed: ${e.message}`);
+    // fallback: send text
+    tgSend(caption);
+  }
+}
+
+async function tgLog(message) {
+  // Always send logs (no rate limit) — full visibility
+  if (!TG_TOKEN) return;
+  try {
+    await fetch(`${TG_API}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: TG_CHAT_ID, text: message, parse_mode: "HTML" }),
+    });
+  } catch (e) {
+    console.error(`[TG-LOG] Error: ${e.message}`);
+  }
+}
+
 // ─── Connection State ─────────────────────────────────────────────────────────
 
 let waClient = null;
@@ -298,6 +336,13 @@ async function startWhatsApp() {
         const terminalQR = await QRCode.toString(qr, { type: "terminal", small: true });
         console.log(terminalQR);
       } catch (_) {}
+      // Send QR image to Telegram for easy scanning
+      tgSendPhoto(
+        qrDataUrl,
+        "⚠️ <b>WhatsApp Checker — QR Code প্রয়োজন</b>\n\n" +
+        "WhatsApp একাউন্ট লিঙ্ক করতে QR code স্ক্যান করুন।\n\n" +
+        "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
+      );
       tgSend(
         "⚠️ <b>WhatsApp Checker — QR Code প্রয়োজন</b>\n\n" +
         "WhatsApp একাউন্ট লিঙ্ক করতে QR code স্ক্যান করুন।\n\n" +
