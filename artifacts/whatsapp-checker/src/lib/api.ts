@@ -22,14 +22,23 @@ export interface Stats {
   totalWithWhatsapp: number;
   totalWithoutWhatsapp: number;
   successRate: number;
+  uptime?: number;
 }
 
 export type ConnectionState = "disconnected" | "qr" | "connecting" | "connected" | "logged_out";
 
 export interface WAStatus {
   connection: ConnectionState;
-  /** Increments every time a new QR is generated. Load /api/qr?v={qrVersion} for the image. */
   qrVersion: number;
+}
+
+export interface ProgressUpdate {
+  checked: number;
+  total: number;
+  current?: string;
+  withWA?: number;
+  withoutWA?: number;
+  done?: boolean;
 }
 
 export async function getStatus(): Promise<WAStatus> {
@@ -41,6 +50,12 @@ export async function getStatus(): Promise<WAStatus> {
 export async function connectWhatsApp(): Promise<{ message: string; connection: string }> {
   const res = await fetch(`${BASE}/connect`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to connect");
+  return res.json();
+}
+
+export async function disconnectWhatsApp(): Promise<{ message: string; connection: string }> {
+  const res = await fetch(`${BASE}/disconnect`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to disconnect");
   return res.json();
 }
 
@@ -78,34 +93,36 @@ export async function getSession(id: number): Promise<CheckSession> {
   return res.json();
 }
 
+export async function deleteSession(id: number): Promise<void> {
+  const res = await fetch(`${BASE}/history/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete session");
+}
+
+export async function clearHistory(): Promise<void> {
+  const res = await fetch(`${BASE}/history`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to clear history");
+}
+
 export async function getStats(): Promise<Stats> {
   const res = await fetch(`${BASE}/stats`);
   if (!res.ok) throw new Error("Failed to fetch stats");
   return res.json();
 }
 
-/**
- * Creates a Server-Sent Events connection for real-time status updates.
- *
- * Debounce strategy:
- *  - "connected" and "qr" are applied immediately (user needs to see these ASAP).
- *  - "connecting" / "disconnected" / "logged_out" are debounced 1200ms so that a
- *    brief open→close cycle on the backend doesn't flicker the banner.
- */
-export function createStatusEventSource(onStatus: (status: WAStatus) => void): () => void {
+export function createStatusEventSource(
+  onStatus: (status: WAStatus) => void,
+  onProgress?: (progress: ProgressUpdate) => void
+): () => void {
   const es = new EventSource(`${BASE}/events`);
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   function handleStatus(status: WAStatus) {
-    // Important states → apply immediately, cancel any pending debounce
     if (status.connection === "connected" || status.connection === "qr") {
       if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
       onStatus(status);
       return;
     }
-
-    // Transient states → debounce so rapid cycling doesn't flash the UI
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
@@ -114,14 +131,16 @@ export function createStatusEventSource(onStatus: (status: WAStatus) => void): (
   }
 
   es.addEventListener("status", (e: MessageEvent) => {
-    try {
-      handleStatus(JSON.parse(e.data));
-    } catch (_) {}
+    try { handleStatus(JSON.parse(e.data)); } catch (_) {}
   });
 
-  es.onerror = () => {
-    // EventSource will auto-reconnect; no action needed
-  };
+  if (onProgress) {
+    es.addEventListener("progress", (e: MessageEvent) => {
+      try { onProgress(JSON.parse(e.data)); } catch (_) {}
+    });
+  }
+
+  es.onerror = () => {};
 
   return () => {
     if (debounceTimer) clearTimeout(debounceTimer);

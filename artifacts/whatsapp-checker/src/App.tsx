@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
-import { CheckerPage } from "@/pages/CheckerPage";
+import CheckerPage from "@/pages/CheckerPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {

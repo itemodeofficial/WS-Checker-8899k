@@ -1,24 +1,28 @@
 import { useState, useEffect, useRef } from "react";
-import { QrCode, RefreshCw } from "lucide-react";
+import { QrCode, RefreshCw, Wifi, WifiOff, Trash2, Download, LogOut } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   checkNumbers,
   connectWhatsApp,
+  disconnectWhatsApp,
   forceQR,
   getHistory,
   getStats,
   getSession,
   getStatus,
+  deleteSession,
+  clearHistory,
   createStatusEventSource,
   type CheckSession,
   type NumberResult,
   type ConnectionState,
   type WAStatus,
+  type ProgressUpdate,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-// ─── Small components ─────────────────────────────────────────────────────────
+// ─── Stat Card ────────────────────────────────────────────────────────────────
 
 function StatCard({ label, value, color }: { label: string; value: string | number; color?: string }) {
   return (
@@ -28,6 +32,8 @@ function StatCard({ label, value, color }: { label: string; value: string | numb
     </div>
   );
 }
+
+// ─── Result Row ───────────────────────────────────────────────────────────────
 
 function ResultRow({ result }: { result: NumberResult }) {
   return (
@@ -47,7 +53,7 @@ function ResultRow({ result }: { result: NumberResult }) {
         {result.error && <span className="text-xs text-amber-700">{result.error}</span>}
       </div>
       <div className={cn(
-        "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold",
+        "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold shrink-0",
         result.error
           ? "bg-amber-100 text-amber-700"
           : result.hasWhatsapp
@@ -60,25 +66,79 @@ function ResultRow({ result }: { result: NumberResult }) {
   );
 }
 
-function HistoryItem({ session, onView }: { session: CheckSession; onView: () => void }) {
+// ─── History Item ─────────────────────────────────────────────────────────────
+
+function HistoryItem({
+  session,
+  onView,
+  onDelete,
+}: {
+  session: CheckSession;
+  onView: () => void;
+  onDelete: () => void;
+}) {
   const rate = session.total > 0 ? Math.round((session.withWhatsapp / session.total) * 100) : 0;
   return (
-    <button
-      onClick={onView}
-      className="w-full text-left bg-white rounded-lg border border-border p-3 hover:border-primary/50 hover:shadow-sm transition-all"
-    >
-      <div className="flex items-center justify-between">
-        <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-medium text-foreground">{session.total} numbers checked</span>
-          <span className="text-xs text-muted-foreground">{new Date(session.checkedAt).toLocaleString()}</span>
+    <div className="w-full bg-white rounded-lg border border-border p-3 hover:border-primary/40 hover:shadow-sm transition-all flex items-center gap-2">
+      <button onClick={onView} className="flex-1 text-left">
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm font-medium text-foreground">{session.total} numbers checked</span>
+            <span className="text-xs text-muted-foreground">{new Date(session.checkedAt).toLocaleString()}</span>
+          </div>
+          <div className="flex items-center gap-2 text-xs mr-2">
+            <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">{session.withWhatsapp} ✓</span>
+            <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">{session.withoutWhatsapp} ✗</span>
+            <span className="text-muted-foreground">{rate}%</span>
+          </div>
         </div>
-        <div className="flex items-center gap-2 text-xs">
-          <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">{session.withWhatsapp} ✓</span>
-          <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">{session.withoutWhatsapp} ✗</span>
-          <span className="text-muted-foreground">{rate}%</span>
+      </button>
+      <button
+        onClick={(e) => { e.stopPropagation(); onDelete(); }}
+        className="shrink-0 p-1.5 rounded-lg text-muted-foreground hover:text-red-500 hover:bg-red-50 transition-colors"
+        title="Delete session"
+      >
+        <Trash2 className="w-4 h-4" />
+      </button>
+    </div>
+  );
+}
+
+// ─── Progress Bar ─────────────────────────────────────────────────────────────
+
+function ProgressBar({ progress }: { progress: ProgressUpdate | null }) {
+  if (!progress || progress.total === 0) return null;
+  const pct = Math.round((progress.checked / progress.total) * 100);
+
+  return (
+    <div className="bg-white rounded-xl border border-border p-4 shadow-sm space-y-2">
+      <div className="flex items-center justify-between text-sm">
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />
+          <span className="font-medium text-foreground">
+            Checking {progress.checked} / {progress.total}
+          </span>
         </div>
+        <span className="text-xs font-bold text-primary">{pct}%</span>
       </div>
-    </button>
+      <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-primary rounded-full transition-all duration-300"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {progress.current && (
+        <p className="text-xs text-muted-foreground font-mono truncate">
+          Checking: {progress.current}
+          {progress.withWA !== undefined && (
+            <span className="ml-2 text-green-600 font-medium">✓ {progress.withWA}</span>
+          )}
+          {progress.withoutWA !== undefined && (
+            <span className="ml-1 text-red-500 font-medium">✗ {progress.withoutWA}</span>
+          )}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -88,19 +148,33 @@ function ConnectionBanner({
   state,
   qrVersion,
   onConnect,
+  onDisconnect,
   connecting,
+  disconnecting,
 }: {
   state: ConnectionState;
   qrVersion: number;
   onConnect: () => void;
+  onDisconnect: () => void;
   connecting: boolean;
+  disconnecting: boolean;
 }) {
   if (state === "connected") {
     return (
-      <div className="bg-green-50 border border-green-200 rounded-xl px-5 py-3 mb-4 flex items-center gap-2">
-        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shrink-0" />
-        <span className="text-sm font-semibold text-green-800">WhatsApp Connected</span>
-        <span className="text-xs text-green-600">— realtime updates active</span>
+      <div className="bg-green-50 border border-green-200 rounded-xl px-5 py-3 mb-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shrink-0" />
+          <span className="text-sm font-semibold text-green-800">WhatsApp Connected</span>
+          <span className="text-xs text-green-600 hidden sm:inline">— realtime updates active</span>
+        </div>
+        <button
+          onClick={onDisconnect}
+          disabled={disconnecting}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-red-200 bg-white text-red-600 hover:bg-red-50 active:scale-95 transition-all disabled:opacity-50 shrink-0"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          Disconnect
+        </button>
       </div>
     );
   }
@@ -112,14 +186,13 @@ function ConnectionBanner({
           <div className="text-center">
             <h2 className="font-bold text-foreground text-lg">Connect Your WhatsApp</h2>
             <p className="text-sm text-muted-foreground mt-1 max-w-xs">
-              Open WhatsApp on your phone → tap <strong>Linked Devices</strong> → tap <strong>Link a Device</strong> → scan this QR code
+              Open WhatsApp → tap <strong>Linked Devices</strong> → <strong>Link a Device</strong> → scan QR
             </p>
             <p className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-1.5 mt-2 inline-block">
-              One-time scan — your session stays active permanently
+              One-time scan — session stays active permanently
             </p>
           </div>
           <div className="border-4 border-primary/20 rounded-2xl p-2 bg-white shadow-inner">
-            {/* Load QR as a direct image — no giant base64 string in memory/network */}
             <img
               key={qrVersion}
               src={`/api/qr?v=${qrVersion}`}
@@ -127,7 +200,7 @@ function ConnectionBanner({
               className="w-72 h-72"
             />
           </div>
-          <p className="text-xs text-muted-foreground">QR code refreshes automatically if it expires</p>
+          <p className="text-xs text-muted-foreground">QR code refreshes automatically if expired</p>
         </div>
       ) : (
         <div className="p-5 flex items-center justify-between gap-4">
@@ -135,22 +208,22 @@ function ConnectionBanner({
             {connecting ? (
               <div className="w-7 h-7 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />
             ) : (
-              <div className="w-7 h-7 rounded-full bg-gray-100 flex items-center justify-center shrink-0 text-gray-400 text-lg">●</div>
+              <WifiOff className="w-6 h-6 text-gray-400 shrink-0" />
             )}
             <div>
               <p className="text-sm font-semibold text-foreground">
                 {state === "connecting" ? "Connecting to WhatsApp…"
-                  : state === "logged_out" ? "Session expired — reconnecting…"
+                  : state === "logged_out" ? "Session expired"
                   : "WhatsApp not connected"}
               </p>
               <p className="text-xs text-muted-foreground mt-0.5">
                 {state === "disconnected"
-                  ? "Click Connect to link your WhatsApp account once."
-                  : "A QR code will appear shortly. You only need to scan it once."}
+                  ? "Click Connect to link your WhatsApp account."
+                  : "QR code will appear shortly."}
               </p>
             </div>
           </div>
-          {state === "disconnected" && (
+          {(state === "disconnected" || state === "logged_out") && (
             <button
               onClick={onConnect}
               disabled={connecting}
@@ -184,22 +257,16 @@ function CodeBlock({ code }: { code: string }) {
   );
 }
 
-
 function DocSection({
-  method,
-  path,
-  badge,
-  description,
-  children,
+  method, path, badge, description, children,
 }: {
-  method: string;
-  path: string;
-  badge?: string;
-  description: string;
-  children: React.ReactNode;
+  method: string; path: string; badge?: string; description: string; children: React.ReactNode;
 }) {
-  const methodColor =
-    method === "POST" ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700";
+  const methodColor = method === "POST"
+    ? "bg-green-100 text-green-700"
+    : method === "DELETE"
+    ? "bg-red-100 text-red-700"
+    : "bg-blue-100 text-blue-700";
   return (
     <div className="bg-white rounded-xl border border-border shadow-sm overflow-hidden">
       <div className="px-5 py-4 border-b border-border flex items-center gap-3 flex-wrap">
@@ -259,461 +326,205 @@ function ErrorRow({ status, condition, body }: { status: number; condition: stri
 function DocsPage() {
   return (
     <div className="space-y-5">
-
-      {/* Overview */}
       <div className="bg-white rounded-xl border border-border p-5 shadow-sm">
         <h2 className="font-bold text-lg text-foreground">WhatsApp Number Checker API</h2>
         <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
           REST API for checking whether phone numbers are registered on WhatsApp.
-          Requires a <strong>one-time QR scan</strong> to link your account — after that the session stays
-          active automatically, even across server restarts.
           Base URL: <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs font-mono">/api</code>
         </p>
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
           <span className="bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded">One-time login</span>
-          <span className="bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded">No API key</span>
-          <span className="bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded">SSE realtime</span>
+          <span className="bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded">SSE realtime progress</span>
+          <span className="bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded">Rate limited</span>
           <span className="bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded">Up to 100 numbers/request</span>
         </div>
       </div>
 
-      {/* Quick start */}
       <div className="bg-white rounded-xl border border-border p-5 shadow-sm space-y-3">
         <h3 className="font-semibold text-foreground">Quick Start</h3>
         <ol className="text-sm text-muted-foreground space-y-1.5 list-decimal list-inside leading-relaxed">
-          <li>Check <code className="bg-gray-100 px-1 rounded text-xs font-mono">GET /api/status</code> — if <code className="bg-gray-100 px-1 rounded text-xs font-mono">connection</code> is <code className="bg-gray-100 px-1 rounded text-xs font-mono">"qr"</code>, display the QR image and scan it with your phone.</li>
-          <li>Wait until <code className="bg-gray-100 px-1 rounded text-xs font-mono">connection</code> becomes <code className="bg-gray-100 px-1 rounded text-xs font-mono">"connected"</code>. Use <code className="bg-gray-100 px-1 rounded text-xs font-mono">GET /api/events</code> (SSE) for instant notification.</li>
-          <li>Call <code className="bg-gray-100 px-1 rounded text-xs font-mono">POST /api/check</code> with your list of numbers.</li>
-          <li>Read <code className="bg-gray-100 px-1 rounded text-xs font-mono">results[].hasWhatsapp</code> in the response.</li>
+          <li>Check <code className="bg-gray-100 px-1 rounded text-xs font-mono">GET /api/status</code> — if <code className="bg-gray-100 px-1 rounded text-xs font-mono">connection</code> is <code className="bg-gray-100 px-1 rounded text-xs font-mono">"qr"</code>, display the QR and scan it.</li>
+          <li>Wait for <code className="bg-gray-100 px-1 rounded text-xs font-mono">connection === "connected"</code> via SSE.</li>
+          <li>Call <code className="bg-gray-100 px-1 rounded text-xs font-mono">POST /api/check</code> with your numbers.</li>
+          <li>Subscribe to <code className="bg-gray-100 px-1 rounded text-xs font-mono">GET /api/events</code> for live progress.</li>
         </ol>
-        <Label>Full workflow (JavaScript)</Label>
-        <CodeBlock code={`// 1. Wait for connection
-const es = new EventSource('/api/events');
-await new Promise(resolve => {
-  es.addEventListener('status', function handler(e) {
-    if (JSON.parse(e.data).connection === 'connected') {
-      es.removeEventListener('status', handler);
-      resolve();
-    }
-  });
+        <Label>JavaScript example</Label>
+        <CodeBlock code={`const es = new EventSource('/api/events');
+
+// Listen for real-time progress
+es.addEventListener('progress', e => {
+  const { checked, total, withWA } = JSON.parse(e.data);
+  console.log(\`\${checked}/\${total} checked, \${withWA} have WhatsApp\`);
 });
 
-// 2. Check numbers
+// Check numbers
 const res = await fetch('/api/check', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    numbers: ['+12025551234', '+447700900123', '+4915112345678']
-  })
+  body: JSON.stringify({ numbers: ['+880123456789', '+1234567890'] })
 });
 const session = await res.json();
-
-// 3. Read results
-session.results.forEach(r => {
-  console.log(r.formattedNumber, r.hasWhatsapp ? '✓ has WhatsApp' : '✗ no WhatsApp');
-});`} />
+session.results.forEach(r =>
+  console.log(r.formattedNumber, r.hasWhatsapp ? '✓' : '✗')
+);`} />
       </div>
 
-      {/* GET /api/check/:number — single check */}
-      <DocSection
-        method="GET"
-        path="/api/check/:number"
-        badge="Single check"
-        description="Check one phone number directly in the URL. Great for quick lookups, browser testing, or simple integrations. Include the country code (with or without the leading +)."
-      >
+      <DocSection method="GET" path="/api/check/:number" badge="Single check"
+        description="Check one number via URL. Include country code.">
         <div>
-          <Label>URL parameter</Label>
-          <SchemaTable rows={[
-            { field: ":number", type: "string", note: "Phone number in E.164 format, e.g. +13124464775 or 13124464775. URL-encode the + as %2B if needed." },
-          ]} />
+          <Label>cURL</Label>
+          <CodeBlock code={`curl "http://YOUR_VPS_IP:3000/api/check/+8801234567890"
+curl "http://YOUR_VPS_IP:3000/api/check/8801234567890"`} />
         </div>
         <div>
-          <Label>Response schema</Label>
-          <SchemaTable rows={[
-            { field: "number", type: "string", note: "The original value from the URL." },
-            { field: "formattedNumber", type: "string", note: "Normalized E.164 form used for the lookup." },
-            { field: "hasWhatsapp", type: "boolean", note: "true if the number is registered on WhatsApp." },
-            { field: "error", type: "string | null", note: "null on success. An error message if the lookup failed." },
-          ]} />
-        </div>
-        <div>
-          <Label>Success response (200)</Label>
-          <CodeBlock code={`{
-  "number": "+13124464775",
-  "formattedNumber": "+13124464775",
-  "hasWhatsapp": true,
-  "error": null
-}`} />
-        </div>
-        <div className="space-y-2">
-          <Label>Error responses</Label>
-          <ErrorRow status={400} condition="number too short or malformed" body={`{ "number": "abc", "formattedNumber": "abc", "hasWhatsapp": false, "error": "Invalid number format" }`} />
-          <ErrorRow status={503} condition="WhatsApp not connected" body={`{ "error": "WhatsApp not connected. Please scan the QR code first.", "connection": "qr" }`} />
-        </div>
-        <div className="space-y-3">
-          <Label>Code examples</Label>
-          <div>
-            <p className="text-xs text-muted-foreground mb-1">Browser / cURL</p>
-            <CodeBlock code={`curl "https://your-domain/api/check/%2B13124464775"
-
-# Or without encoding the +
-curl "https://your-domain/api/check/13124464775"`} />
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground mb-1">JavaScript</p>
-            <CodeBlock code={`const number = '+13124464775';
-const res = await fetch('/api/check/' + encodeURIComponent(number));
-const { formattedNumber, hasWhatsapp } = await res.json();
-console.log(formattedNumber, hasWhatsapp ? '✓ has WhatsApp' : '✗ no WhatsApp');`} />
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground mb-1">Python</p>
-            <CodeBlock code={`import requests
-from urllib.parse import quote
-
-number = '+13124464775'
-r = requests.get(f'https://your-domain/api/check/{quote(number)}')
-data = r.json()
-print(data['formattedNumber'], '✓' if data['hasWhatsapp'] else '✗')`} />
-          </div>
+          <Label>Response</Label>
+          <CodeBlock code={`{ "number": "+8801234567890", "formattedNumber": "+8801234567890", "hasWhatsapp": true, "error": null }`} />
         </div>
       </DocSection>
 
-      {/* POST /api/check — batch */}
-      <DocSection
-        method="POST"
-        path="/api/check"
-        badge="Batch (up to 100)"
-        description="Check multiple phone numbers in one request. The server must be in 'connected' state. Include country code in every number. Up to 100 numbers per call. Results are saved to the database."
-      >
+      <DocSection method="POST" path="/api/check" badge="Batch (up to 100)"
+        description="Check multiple numbers. Progress is broadcast in real-time via /api/events SSE. Max 100 per request. Rate limited to 30 req/min.">
         <div>
-          <Label>Request body</Label>
-          <SchemaTable rows={[
-            { field: "numbers", type: "string[]", note: "Phone numbers in E.164 format or digits only. Country code required. Max 100." },
-          ]} />
-        </div>
-        <div>
-          <Label>Request example</Label>
-          <CodeBlock code={`POST /api/check
-Content-Type: application/json
-
-{
-  "numbers": ["+12025551234", "+447700900123", "+4915112345678", "5511987654321"]
-}`} />
-        </div>
-        <div>
-          <Label>Response schema</Label>
-          <SchemaTable rows={[
-            { field: "id", type: "number", note: "Auto-incrementing session ID." },
-            { field: "total", type: "number", note: "How many numbers were checked." },
-            { field: "withWhatsapp", type: "number", note: "Count that have WhatsApp." },
-            { field: "withoutWhatsapp", type: "number", note: "Count that do not have WhatsApp." },
-            { field: "checkedAt", type: "string", note: "ISO 8601 timestamp of when the check ran." },
-            { field: "results", type: "NumberResult[]", note: "One entry per number — see table below." },
-          ]} />
-        </div>
-        <div>
-          <Label>NumberResult schema</Label>
-          <SchemaTable rows={[
-            { field: "number", type: "string", note: "The original value you submitted." },
-            { field: "formattedNumber", type: "string", note: "Normalized E.164 form used for the lookup, e.g. +12025551234." },
-            { field: "hasWhatsapp", type: "boolean", note: "true if the number is registered on WhatsApp." },
-            { field: "error", type: "string | null", note: "null on success. A message if the number was invalid or a lookup error occurred." },
-          ]} />
-        </div>
-        <div>
-          <Label>Success response (200)</Label>
-          <CodeBlock code={`{
-  "id": 3,
-  "total": 4,
-  "withWhatsapp": 3,
-  "withoutWhatsapp": 1,
-  "checkedAt": "2025-06-10T14:22:05.123Z",
-  "results": [
-    { "number": "+12025551234",   "formattedNumber": "+12025551234",   "hasWhatsapp": true,  "error": null },
-    { "number": "+447700900123",  "formattedNumber": "+447700900123",  "hasWhatsapp": true,  "error": null },
-    { "number": "+4915112345678", "formattedNumber": "+4915112345678", "hasWhatsapp": false, "error": null },
-    { "number": "bad-number",     "formattedNumber": "bad-number",     "hasWhatsapp": false, "error": "Invalid number format" }
-  ]
-}`} />
-        </div>
-        <div className="space-y-2">
-          <Label>Error responses</Label>
-          <ErrorRow status={400} condition="numbers field missing or not an array" body={`{ "error": "numbers must be a non-empty array" }`} />
-          <ErrorRow status={400} condition="more than 100 numbers submitted" body={`{ "error": "Maximum 100 numbers per request" }`} />
-          <ErrorRow status={503} condition="WhatsApp not yet connected" body={`{
-  "error": "WhatsApp not connected. Please scan the QR code first.",
-  "connection": "qr",
-  "qr": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
-}`} />
-        </div>
-        <div className="space-y-3">
-          <Label>Code examples</Label>
-          <div>
-            <p className="text-xs text-muted-foreground mb-1">cURL</p>
-            <CodeBlock code={`curl -X POST https://your-domain/api/check \\
+          <Label>Request</Label>
+          <CodeBlock code={`curl -X POST http://YOUR_VPS_IP:3000/api/check \\
   -H "Content-Type: application/json" \\
-  -d '{"numbers":["+12025551234","+447700900123"]}'`} />
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground mb-1">JavaScript</p>
-            <CodeBlock code={`const res = await fetch('/api/check', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ numbers: ['+12025551234', '+447700900123'] })
-});
-
-if (!res.ok) {
-  const { error } = await res.json();
-  throw new Error(error); // e.g. "WhatsApp not connected"
-}
-
-const { id, total, withWhatsapp, results } = await res.json();
-console.log(\`Session \${id}: \${withWhatsapp}/\${total} have WhatsApp\`);
-
-results.forEach(r => {
-  const icon = r.error ? '⚠' : r.hasWhatsapp ? '✓' : '✗';
-  console.log(icon, r.formattedNumber);
-});`} />
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground mb-1">Python</p>
-            <CodeBlock code={`import requests
-
-r = requests.post('https://your-domain/api/check',
-    json={'numbers': ['+12025551234', '+447700900123', '+4915112345678']})
-
-if r.status_code != 200:
-    print('Error:', r.json()['error'])
-else:
-    data = r.json()
-    print(f"Session {data['id']}: {data['withWhatsapp']}/{data['total']} have WhatsApp")
-    for result in data['results']:
-        icon = '⚠' if result['error'] else ('✓' if result['hasWhatsapp'] else '✗')
-        print(f"  {icon} {result['formattedNumber']}")`} />
-          </div>
+  -d '{"numbers":["+8801234567890","+447700900123"]}'`} />
         </div>
-      </DocSection>
-
-      {/* GET /api/status */}
-      <DocSection
-        method="GET"
-        path="/api/status"
-        description="Return the current WhatsApp connection state and, when a QR scan is needed, the QR code image as a base64 data URL."
-      >
-        <div>
-          <Label>Response schema</Label>
-          <SchemaTable rows={[
-            { field: "connection", type: "string", note: "connecting | qr | connected | logged_out" },
-            { field: "qr", type: "string | null", note: "Base64 PNG data URL. Only present when connection === 'qr'." },
-          ]} />
-        </div>
-        <div className="space-y-2">
-          <Label>Response examples</Label>
-          <div>
-            <p className="text-xs text-muted-foreground mb-1">When connected</p>
-            <CodeBlock code={`{ "connection": "connected", "qr": null }`} />
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground mb-1">When QR scan is needed</p>
-            <CodeBlock code={`{
-  "connection": "qr",
-  "qr": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
-}`} />
-          </div>
-        </div>
-        <div>
-          <Label>cURL</Label>
-          <CodeBlock code={`curl https://your-domain/api/status`} />
-        </div>
-      </DocSection>
-
-      {/* GET /api/events */}
-      <DocSection
-        method="GET"
-        path="/api/events"
-        description="Server-Sent Events stream. Pushes a 'status' event in real time whenever the connection state or QR code changes — no polling needed. The current state is sent immediately on connect."
-      >
-        <div>
-          <Label>Event format</Label>
-          <CodeBlock code={`event: status\ndata: { "connection": "connected", "qr": null }`} />
-        </div>
-        <div>
-          <Label>JavaScript (EventSource)</Label>
-          <CodeBlock code={`const es = new EventSource('/api/events');
-
-es.addEventListener('status', (e) => {
-  const { connection, qr } = JSON.parse(e.data);
-
-  if (connection === 'qr' && qr) {
-    document.getElementById('qr-img').src = qr; // Show QR to user
-  }
-  if (connection === 'connected') {
-    console.log('Ready to check numbers!');
-  }
-});
-
-// Stop listening when done
-// es.close();`} />
-        </div>
-        <div>
-          <Label>Python (sseclient-rs)</Label>
-          <CodeBlock code={`import sseclient, requests, json
-
-res = requests.get('https://your-domain/api/events', stream=True)
-for event in sseclient.SSEClient(res).events():
-    if event.event == 'status':
-        data = json.loads(event.data)
-        print(data['connection'])  # e.g. "connected"
-        if data['connection'] == 'connected':
-            break  # Ready to check numbers`} />
-        </div>
-      </DocSection>
-
-      {/* GET /api/history */}
-      <DocSection
-        method="GET"
-        path="/api/history"
-        description="List all past check sessions, newest first. Returns summaries — no per-number results. Use GET /api/history/:id to get full results for a specific session."
-      >
-        <div>
-          <Label>Response (array of session summaries)</Label>
-          <CodeBlock code={`[
-  { "id": 4, "total": 20, "withWhatsapp": 15, "withoutWhatsapp": 5, "checkedAt": "2025-06-10T15:00:00.000Z" },
-  { "id": 3, "total": 4,  "withWhatsapp": 3,  "withoutWhatsapp": 1, "checkedAt": "2025-06-10T14:22:05.123Z" }
-]`} />
-        </div>
-        <div>
-          <Label>cURL</Label>
-          <CodeBlock code={`curl https://your-domain/api/history`} />
-        </div>
-      </DocSection>
-
-      {/* GET /api/history/:id */}
-      <DocSection
-        method="GET"
-        path="/api/history/:id"
-        description="Get the full result of a specific session including every number's result. Use the id from GET /api/history."
-      >
         <div>
           <Label>Response</Label>
           <CodeBlock code={`{
-  "id": 3,
-  "total": 4,
-  "withWhatsapp": 3,
-  "withoutWhatsapp": 1,
+  "id": 3, "total": 2, "withWhatsapp": 1, "withoutWhatsapp": 1,
   "checkedAt": "2025-06-10T14:22:05.123Z",
   "results": [
-    { "number": "+12025551234",   "formattedNumber": "+12025551234",   "hasWhatsapp": true,  "error": null },
-    { "number": "+447700900123",  "formattedNumber": "+447700900123",  "hasWhatsapp": true,  "error": null },
-    { "number": "+4915112345678", "formattedNumber": "+4915112345678", "hasWhatsapp": false, "error": null },
-    { "number": "bad-number",     "formattedNumber": "bad-number",     "hasWhatsapp": false, "error": "Invalid number format" }
+    { "number": "+8801234567890", "formattedNumber": "+8801234567890", "hasWhatsapp": true, "error": null },
+    { "number": "+447700900123",  "formattedNumber": "+447700900123",  "hasWhatsapp": false, "error": null }
   ]
 }`} />
         </div>
-        <div className="space-y-2">
-          <Label>Error responses</Label>
-          <ErrorRow status={404} condition="session ID does not exist" body={`{ "error": "Session not found" }`} />
-        </div>
         <div>
-          <Label>cURL</Label>
-          <CodeBlock code={`curl https://your-domain/api/history/3`} />
+          <Label>Python</Label>
+          <CodeBlock code={`import requests
+
+r = requests.post('http://YOUR_VPS_IP:3000/api/check',
+    json={'numbers': ['+8801234567890', '+447700900123']})
+
+data = r.json()
+print(f"Session {data['id']}: {data['withWhatsapp']}/{data['total']} have WhatsApp")
+for result in data['results']:
+    print(('✓' if result['hasWhatsapp'] else '✗'), result['formattedNumber'])`} />
         </div>
       </DocSection>
 
-      {/* GET /api/stats */}
-      <DocSection
-        method="GET"
-        path="/api/stats"
-        description="Cumulative totals and WhatsApp rate across all sessions run on this server."
-      >
+      <DocSection method="GET" path="/api/events"
+        description="Server-Sent Events. Sends 'status' events for connection changes and 'progress' events during batch checks.">
+        <div>
+          <Label>Progress event data</Label>
+          <SchemaTable rows={[
+            { field: "checked", type: "number", note: "How many numbers checked so far" },
+            { field: "total", type: "number", note: "Total numbers in this batch" },
+            { field: "current", type: "string", note: "The number currently being checked" },
+            { field: "withWA", type: "number", note: "Count with WhatsApp so far" },
+            { field: "withoutWA", type: "number", note: "Count without WhatsApp so far" },
+            { field: "done", type: "boolean", note: "true when batch is complete" },
+          ]} />
+        </div>
+      </DocSection>
+
+      <DocSection method="GET" path="/api/status" description="Current connection state.">
         <div>
           <Label>Response</Label>
-          <CodeBlock code={`{
-  "totalChecks": 12,
-  "totalNumbersChecked": 847,
-  "totalWithWhatsapp": 631,
-  "totalWithoutWhatsapp": 216,
-  "successRate": 74.5
-}`} />
-        </div>
-        <div>
-          <Label>cURL</Label>
-          <CodeBlock code={`curl https://your-domain/api/stats`} />
+          <CodeBlock code={`{ "connection": "connected", "qrVersion": 0 }`} />
         </div>
       </DocSection>
 
-      {/* GET /api/healthz */}
-      <DocSection
-        method="GET"
-        path="/api/healthz"
-        description="Lightweight health check. Returns 200 OK with current connection state."
-      >
+      <DocSection method="GET" path="/api/healthz" description="Health check. Returns uptime, memory, SSE client count.">
         <div>
           <Label>Response</Label>
-          <CodeBlock code={`{ "status": "ok", "connection": "connected" }`} />
-        </div>
-        <div>
-          <Label>cURL</Label>
-          <CodeBlock code={`curl https://your-domain/api/healthz`} />
+          <CodeBlock code={`{ "status": "ok", "connection": "connected", "uptime": 3600, "memory": "120MB", "clients": 2 }`} />
         </div>
       </DocSection>
 
+      <DocSection method="DELETE" path="/api/history/:id" description="Delete a single check session from the database.">
+        <div>
+          <Label>cURL</Label>
+          <CodeBlock code={`curl -X DELETE http://YOUR_VPS_IP:3000/api/history/3`} />
+        </div>
+      </DocSection>
+
+      <DocSection method="DELETE" path="/api/history" description="Clear all check history from the database.">
+        <div>
+          <Label>cURL</Label>
+          <CodeBlock code={`curl -X DELETE http://YOUR_VPS_IP:3000/api/history`} />
+        </div>
+      </DocSection>
+
+      <DocSection method="POST" path="/api/disconnect" description="Manually disconnect WhatsApp session (does not wipe credentials).">
+        <div>
+          <Label>cURL</Label>
+          <CodeBlock code={`curl -X POST http://YOUR_VPS_IP:3000/api/disconnect`} />
+        </div>
+      </DocSection>
     </div>
   );
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
-export function CheckerPage() {
-  const [input, setInput] = useState("");
-  const [results, setResults] = useState<CheckSession | null>(null);
-  const [activeTab, setActiveTab] = useState<"check" | "history" | "stats" | "api">("check");
-  const [viewingSession, setViewingSession] = useState<number | null>(null);
-
-  const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
-  const [qrVersion, setQrVersion] = useState<number>(0);
-  const [connectPending, setConnectPending] = useState(false);
-  const [forceQrPending, setForceQrPending] = useState(false);
-
+export default function CheckerPage() {
   const queryClient = useQueryClient();
+  const [activeTab, setActiveTab] = useState<"check" | "history" | "stats" | "api">("check");
+  const [input, setInput] = useState("");
+  const [results, setResults] = useState<(CheckSession & { results?: NumberResult[] }) | null>(null);
+  const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
+  const [qrVersion, setQrVersion] = useState(0);
+  const [connectPending, setConnectPending] = useState(false);
+  const [disconnectPending, setDisconnectPending] = useState(false);
+  const [forceQrPending, setForceQrPending] = useState(false);
+  const [viewingSession, setViewingSession] = useState<number | null>(null);
+  const [progress, setProgress] = useState<ProgressUpdate | null>(null);
+  const sseCleanupRef = useRef<(() => void) | null>(null);
 
-  // Bootstrap with HTTP fetch, then switch to SSE for realtime updates.
-  // A polling fallback runs every 8s while not connected, so the QR always
-  // appears even if the SSE connection is dropped or buffered by a proxy.
+  // Live number count
+  const numberCount = input.split(/[\n,;]+/).filter((l) => l.trim()).length;
+
   useEffect(() => {
-    let sseCleanup: (() => void) | null = null;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-    function applyStatus(s: WAStatus) {
-      setConnectionState(s.connection);
-      if (s.connection === "qr" && s.qrVersion > 0) setQrVersion(s.qrVersion);
-      else if (s.connection !== "qr") setQrVersion(0);
-    }
-
     async function poll() {
-      try { applyStatus(await getStatus()); } catch (_) {}
+      try {
+        const s = await getStatus();
+        setConnectionState(s.connection);
+        if (s.qrVersion > 0) setQrVersion(s.qrVersion);
+      } catch (_) {}
     }
 
-    poll().finally(() => {
-      sseCleanup = createStatusEventSource(applyStatus);
-      // Polling fallback: keeps the QR fresh even when SSE is unreliable
+    poll().then(() => {
+      const cleanup = createStatusEventSource(
+        (s: WAStatus) => {
+          setConnectionState(s.connection);
+          if (s.qrVersion > 0) setQrVersion(s.qrVersion);
+        },
+        (p: ProgressUpdate) => {
+          setProgress(p.done ? null : p);
+        }
+      );
+      sseCleanupRef.current = cleanup;
       pollTimer = setInterval(poll, 8000);
     });
 
     return () => {
-      sseCleanup?.();
+      sseCleanupRef.current?.();
       if (pollTimer) clearInterval(pollTimer);
     };
   }, []);
 
-  const { data: history = [] } = useQuery({
+  const { data: history = [], refetch: refetchHistory } = useQuery({
     queryKey: ["history"],
     queryFn: getHistory,
     enabled: activeTab === "history",
   });
 
-  const { data: stats } = useQuery({
+  const { data: stats, refetch: refetchStats } = useQuery({
     queryKey: ["stats"],
     queryFn: getStats,
     enabled: activeTab === "stats",
@@ -729,11 +540,13 @@ export function CheckerPage() {
     mutationFn: checkNumbers,
     onSuccess: (data) => {
       setResults(data);
+      setProgress(null);
       queryClient.invalidateQueries({ queryKey: ["history"] });
       queryClient.invalidateQueries({ queryKey: ["stats"] });
       toast.success(`Checked ${data.total} numbers — ${data.withWhatsapp} have WhatsApp`);
     },
-    onError: (err: Error & { connection?: string; qr?: string }) => {
+    onError: (err: Error & { connection?: string }) => {
+      setProgress(null);
       if (err.connection && err.connection !== "connected") {
         toast.error("WhatsApp not connected — scan the QR code first");
       } else {
@@ -751,6 +564,19 @@ export function CheckerPage() {
       toast.error("Failed to start connection");
     } finally {
       setConnectPending(false);
+    }
+  }
+
+  async function handleDisconnect() {
+    setDisconnectPending(true);
+    try {
+      await disconnectWhatsApp();
+      setConnectionState("disconnected");
+      toast.success("WhatsApp disconnected");
+    } catch {
+      toast.error("Failed to disconnect");
+    } finally {
+      setDisconnectPending(false);
     }
   }
 
@@ -773,7 +599,33 @@ export function CheckerPage() {
     if (lines.length > 100) { toast.error("Maximum 100 numbers per check"); return; }
     if (connectionState !== "connected") { toast.error("WhatsApp not connected — scan the QR code first"); return; }
     setResults(null);
+    setProgress({ checked: 0, total: lines.length });
     mutation.mutate(lines);
+  }
+
+  async function handleDeleteSession(id: number) {
+    try {
+      await deleteSession(id);
+      toast.success("Session deleted");
+      queryClient.invalidateQueries({ queryKey: ["history"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+      if (viewingSession === id) setViewingSession(null);
+    } catch {
+      toast.error("Failed to delete session");
+    }
+  }
+
+  async function handleClearHistory() {
+    if (!confirm("Clear all check history? This cannot be undone.")) return;
+    try {
+      await clearHistory();
+      toast.success("All history cleared");
+      queryClient.invalidateQueries({ queryKey: ["history"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+      setViewingSession(null);
+    } catch {
+      toast.error("Failed to clear history");
+    }
   }
 
   function handleExportCSV(session: CheckSession) {
@@ -787,11 +639,12 @@ export function CheckerPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `whatsapp-check-${session.id}.csv`;
+    a.download = `wa-check-${session.id}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
+  // Header status pill
   const statusDot = connectionState === "connected"
     ? "bg-green-500 animate-pulse"
     : connectionState === "qr"
@@ -800,54 +653,46 @@ export function CheckerPage() {
     ? "bg-blue-400 animate-ping"
     : "bg-gray-400";
 
-  const statusLabel = connectionState === "connected"
-    ? "Connected"
-    : connectionState === "qr"
-    ? "Scan QR"
-    : connectionState === "connecting"
-    ? "Connecting…"
-    : connectionState === "logged_out"
-    ? "Logged out"
+  const statusLabel = connectionState === "connected" ? "Connected"
+    : connectionState === "qr" ? "Scan QR"
+    : connectionState === "connecting" ? "Connecting…"
+    : connectionState === "logged_out" ? "Logged out"
     : "Disconnected";
 
-  const statusColor = connectionState === "connected"
-    ? "bg-green-100 text-green-700"
-    : connectionState === "qr"
-    ? "bg-amber-100 text-amber-700"
-    : connectionState === "connecting"
-    ? "bg-blue-50 text-blue-600"
+  const statusColor = connectionState === "connected" ? "bg-green-100 text-green-700"
+    : connectionState === "qr" ? "bg-amber-100 text-amber-700"
+    : connectionState === "connecting" ? "bg-blue-50 text-blue-600"
     : "bg-gray-100 text-gray-500";
 
   return (
     <div className="min-h-screen bg-background">
+
       {/* Header */}
       <div className="bg-white border-b border-border sticky top-0 z-10">
         <div className="max-w-3xl mx-auto px-4 py-4 flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center text-white text-lg font-bold shadow">
+          <div className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center text-white text-lg font-bold shadow shrink-0">
             W
           </div>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <h1 className="text-lg font-bold text-foreground leading-none">WhatsApp Checker</h1>
-            <p className="text-xs text-muted-foreground">Verify which numbers have WhatsApp</p>
+            <p className="text-xs text-muted-foreground hidden sm:block">Verify which numbers have WhatsApp</p>
           </div>
-          {/* Realtime status pill */}
-          <div className={cn("flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full", statusColor)}>
+
+          {/* Status pill */}
+          <div className={cn("flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full shrink-0", statusColor)}>
             <span className={cn("w-1.5 h-1.5 rounded-full", statusDot)} />
             {statusLabel}
           </div>
-          {/* Force-generate a new QR code (wipes session, forces fresh scan) */}
+
+          {/* New QR button */}
           <button
             onClick={handleForceQR}
             disabled={forceQrPending}
-            title="Force generate new QR code"
+            title="Generate new QR code"
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-white text-foreground hover:bg-accent hover:border-primary/40 active:scale-95 transition-all disabled:opacity-50 shrink-0"
           >
-            {forceQrPending ? (
-              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <QrCode className="w-3.5 h-3.5" />
-            )}
-            New QR
+            {forceQrPending ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <QrCode className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">New QR</span>
           </button>
         </div>
 
@@ -858,7 +703,7 @@ export function CheckerPage() {
               key={tab}
               onClick={() => { setActiveTab(tab); setViewingSession(null); }}
               className={cn(
-                "px-5 py-3 text-sm font-medium capitalize transition-colors border-b-2 -mb-px",
+                "px-4 py-3 text-sm font-medium capitalize transition-colors border-b-2 -mb-px",
                 activeTab === tab
                   ? "border-primary text-primary"
                   : "border-transparent text-muted-foreground hover:text-foreground"
@@ -870,14 +715,17 @@ export function CheckerPage() {
         </div>
       </div>
 
-      <div className="max-w-3xl mx-auto px-4 py-6 space-y-0">
-        {/* Connection banner — always visible when not on docs tab */}
+      <div className="max-w-3xl mx-auto px-4 py-6">
+
+        {/* Connection banner */}
         {activeTab !== "api" && (
           <ConnectionBanner
             state={connectionState}
             qrVersion={qrVersion}
             onConnect={handleConnect}
+            onDisconnect={handleDisconnect}
             connecting={connectPending || connectionState === "connecting"}
+            disconnecting={disconnectPending}
           />
         )}
 
@@ -888,18 +736,23 @@ export function CheckerPage() {
               <div>
                 <h2 className="font-semibold text-foreground">Enter phone numbers</h2>
                 <p className="text-sm text-muted-foreground mt-0.5">
-                  One per line, with country code (e.g. +1 234 567 8900). Up to 100 numbers.
+                  One per line, with country code (e.g. +880 1234 567890). Up to 100 numbers.
                 </p>
               </div>
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder={"+1 234 567 8900\n+44 20 7946 0958\n+49 30 1234567\n+55 11 91234-5678"}
+                placeholder={"+880 1234 567890\n+1 234 567 8900\n+44 20 7946 0958\n+49 30 1234567"}
                 className="w-full h-44 rounded-lg border border-input bg-background px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
               />
               <div className="flex items-center justify-between">
                 <span className="text-xs text-muted-foreground">
-                  {input.split(/[\n,;]+/).filter((l) => l.trim()).length} numbers entered
+                  {numberCount} number{numberCount !== 1 ? "s" : ""} entered
+                  {numberCount > 0 && (
+                    <span className="ml-1 text-muted-foreground/70">
+                      (~{Math.ceil(numberCount * 0.3)}s estimated)
+                    </span>
+                  )}
                 </span>
                 <button
                   onClick={handleCheck}
@@ -916,17 +769,11 @@ export function CheckerPage() {
               </div>
             </div>
 
-            {mutation.isPending && (
-              <div className="bg-accent/60 rounded-xl border border-accent-foreground/10 p-4 flex items-center gap-3">
-                <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />
-                <div>
-                  <p className="text-sm font-medium text-foreground">Checking numbers via WhatsApp…</p>
-                  <p className="text-xs text-muted-foreground">Results are live — may take a moment for large lists</p>
-                </div>
-              </div>
-            )}
+            {/* Progress bar (live during check) */}
+            {mutation.isPending && <ProgressBar progress={progress} />}
 
-            {results && (
+            {/* Results */}
+            {results && !mutation.isPending && (
               <div className="space-y-3">
                 <div className="grid grid-cols-3 gap-3">
                   <StatCard label="Total" value={results.total} />
@@ -936,7 +783,11 @@ export function CheckerPage() {
                 <div className="bg-white rounded-xl border border-border p-5 shadow-sm space-y-3">
                   <div className="flex items-center justify-between">
                     <h3 className="font-semibold text-foreground">Results</h3>
-                    <button onClick={() => handleExportCSV(results)} className="text-xs text-primary hover:underline font-medium">
+                    <button
+                      onClick={() => handleExportCSV(results)}
+                      className="flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
+                    >
+                      <Download className="w-3.5 h-3.5" />
                       Export CSV
                     </button>
                   </div>
@@ -954,9 +805,18 @@ export function CheckerPage() {
           <div className="space-y-4">
             {viewingSession !== null && sessionDetail ? (
               <div className="space-y-3">
-                <button onClick={() => setViewingSession(null)} className="text-sm text-primary hover:underline font-medium">
-                  ← Back to history
-                </button>
+                <div className="flex items-center justify-between">
+                  <button onClick={() => setViewingSession(null)} className="text-sm text-primary hover:underline font-medium">
+                    ← Back to history
+                  </button>
+                  <button
+                    onClick={() => handleDeleteSession(sessionDetail.id)}
+                    className="flex items-center gap-1.5 text-xs text-red-500 hover:text-red-600 font-medium"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete session
+                  </button>
+                </div>
                 <div className="grid grid-cols-3 gap-3">
                   <StatCard label="Total" value={sessionDetail.total} />
                   <StatCard label="Has WhatsApp" value={sessionDetail.withWhatsapp} color="text-green-600" />
@@ -965,7 +825,11 @@ export function CheckerPage() {
                 <div className="bg-white rounded-xl border border-border p-5 shadow-sm space-y-3">
                   <div className="flex items-center justify-between">
                     <h3 className="font-semibold text-foreground">Session #{sessionDetail.id}</h3>
-                    <button onClick={() => handleExportCSV(sessionDetail)} className="text-xs text-primary hover:underline font-medium">
+                    <button
+                      onClick={() => handleExportCSV(sessionDetail)}
+                      className="flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
+                    >
+                      <Download className="w-3.5 h-3.5" />
                       Export CSV
                     </button>
                   </div>
@@ -976,14 +840,32 @@ export function CheckerPage() {
               </div>
             ) : (
               <>
-                <h2 className="font-semibold text-foreground">Check history</h2>
+                <div className="flex items-center justify-between">
+                  <h2 className="font-semibold text-foreground">Check history</h2>
+                  {history.length > 0 && (
+                    <button
+                      onClick={handleClearHistory}
+                      className="flex items-center gap-1.5 text-xs text-red-500 hover:text-red-600 font-medium"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Clear all
+                    </button>
+                  )}
+                </div>
                 {history.length === 0 ? (
                   <div className="bg-white rounded-xl border border-border p-10 text-center text-muted-foreground text-sm shadow-sm">
                     No checks yet. Run your first check above.
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {history.map((s) => <HistoryItem key={s.id} session={s} onView={() => setViewingSession(s.id)} />)}
+                    {history.map((s) => (
+                      <HistoryItem
+                        key={s.id}
+                        session={s}
+                        onView={() => setViewingSession(s.id)}
+                        onDelete={() => handleDeleteSession(s.id)}
+                      />
+                    ))}
                   </div>
                 )}
               </>
@@ -994,16 +876,38 @@ export function CheckerPage() {
         {/* STATS TAB */}
         {activeTab === "stats" && (
           <div className="space-y-4">
-            <h2 className="font-semibold text-foreground">Overall statistics</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold text-foreground">Overall statistics</h2>
+              <button
+                onClick={() => refetchStats()}
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Refresh
+              </button>
+            </div>
             {stats ? (
-              <div className="grid grid-cols-2 gap-3">
-                <StatCard label="Total checks" value={stats.totalChecks} />
-                <StatCard label="Numbers checked" value={stats.totalNumbersChecked} />
-                <StatCard label="With WhatsApp" value={stats.totalWithWhatsapp} color="text-green-600" />
-                <StatCard label="Without WhatsApp" value={stats.totalWithoutWhatsapp} color="text-red-500" />
-                <div className="col-span-2">
-                  <StatCard label="WhatsApp rate" value={`${stats.successRate}%`} color="text-primary" />
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <StatCard label="Total checks" value={stats.totalChecks} />
+                  <StatCard label="Numbers checked" value={stats.totalNumbersChecked} />
+                  <StatCard label="With WhatsApp" value={stats.totalWithWhatsapp} color="text-green-600" />
+                  <StatCard label="Without WhatsApp" value={stats.totalWithoutWhatsapp} color="text-red-500" />
                 </div>
+                <StatCard label="WhatsApp rate" value={`${stats.successRate}%`} color="text-primary" />
+                {stats.uptime !== undefined && (
+                  <div className="bg-white rounded-xl border border-border p-4 shadow-sm flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Wifi className="w-4 h-4 text-green-500" />
+                      <span className="text-sm font-medium text-foreground">Server uptime</span>
+                    </div>
+                    <span className="text-sm font-bold text-foreground">
+                      {stats.uptime > 3600
+                        ? `${Math.floor(stats.uptime / 3600)}h ${Math.floor((stats.uptime % 3600) / 60)}m`
+                        : `${Math.floor(stats.uptime / 60)}m`}
+                    </span>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="bg-white rounded-xl border border-border p-10 text-center text-muted-foreground text-sm shadow-sm">
@@ -1017,9 +921,9 @@ export function CheckerPage() {
         {activeTab === "api" && <DocsPage />}
       </div>
 
-      <div className="max-w-3xl mx-auto px-4 py-8">
+      <div className="max-w-3xl mx-auto px-4 pb-8">
         <p className="text-xs text-muted-foreground text-center">
-          Checks numbers directly via your linked WhatsApp account. Use responsibly and in compliance with applicable laws.
+          Use responsibly and in compliance with applicable laws.
         </p>
       </div>
     </div>

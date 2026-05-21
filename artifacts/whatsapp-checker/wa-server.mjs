@@ -1,5 +1,8 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import compression from "compression";
+import rateLimit from "express-rate-limit";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -9,13 +12,40 @@ const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = express();
-app.use(cors());
-app.use(express.json());
 
-// In production PORT is injected by the platform; fall back to PYTHON_PORT for dev
+// ─── Security & Performance ───────────────────────────────────────────────────
+
+app.use(helmet({
+  contentSecurityPolicy: false, // disabled so React app loads fine
+  crossOriginEmbedderPolicy: false,
+}));
+app.use(compression());
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
+
+// Rate limiting — prevents abuse on the check endpoints
+const checkLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30,             // max 30 requests per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests — please wait a moment before trying again." },
+});
+
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use("/api/check", checkLimiter);
+app.use("/api", generalLimiter);
+
+// ─── Config ───────────────────────────────────────────────────────────────────
+
 const PORT = parseInt(process.env.PORT || process.env.PYTHON_PORT || "5000", 10);
 const IS_PROD = process.env.NODE_ENV === "production";
-// Use separate auth dirs so dev and prod never fight over the same WA session (440 loop)
 const AUTH_DIR = join(__dirname, IS_PROD ? ".wa-auth" : ".wa-auth-dev");
 const DB_PATH = join(__dirname, ".wa-data", IS_PROD ? "checker.db" : "checker-dev.db");
 
@@ -67,9 +97,11 @@ const stmts = {
   getResults: db.prepare(
     "SELECT number, formatted_number, has_whatsapp, error FROM results WHERE session_id = ? ORDER BY id"
   ),
+  deleteSession: db.prepare("DELETE FROM sessions WHERE id = ?"),
+  clearAllSessions: db.prepare("DELETE FROM sessions"),
   stats: db.prepare(`
     SELECT
-      COUNT(*)            AS total_checks,
+      COUNT(*)                     AS total_checks,
       COALESCE(SUM(total), 0)      AS total_numbers,
       COALESCE(SUM(with_wa), 0)    AS total_with,
       COALESCE(SUM(without_wa), 0) AS total_without
@@ -130,50 +162,42 @@ const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "6728122351";
 const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`;
 
-// Rate-limit: don't send the same alert more than once every 60s
 const tgLastSent = new Map();
 
 async function tgSend(message, key = null) {
-  if (!TG_TOKEN) return; // skip if not configured
+  if (!TG_TOKEN) return;
   if (key) {
     const last = tgLastSent.get(key) || 0;
-    if (Date.now() - last < 60_000) return; // throttle
+    if (Date.now() - last < 60_000) return;
     tgLastSent.set(key, Date.now());
   }
   try {
-    const body = JSON.stringify({
-      chat_id: TG_CHAT_ID,
-      text: message,
-      parse_mode: "HTML",
-    });
-    const res = await fetch(`${TG_API}/sendMessage`, {
+    await fetch(`${TG_API}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body,
+      body: JSON.stringify({ chat_id: TG_CHAT_ID, text: message, parse_mode: "HTML" }),
     });
-    if (!res.ok) {
-      const err = await res.text();
-      console.error(`[TG] Send failed: ${err}`);
-    }
   } catch (e) {
-    console.error(`[TG] Error sending message: ${e.message}`);
+    console.error(`[TG] Error: ${e.message}`);
   }
 }
 
-// ─── Connection state ─────────────────────────────────────────────────────────
+// ─── Connection State ─────────────────────────────────────────────────────────
 
 let waClient = null;
-let qrCode = null;       // base64 data URL, kept server-side only
-let qrVersion = 0;       // increments every time a new QR is generated
+let qrCode = null;
+let qrVersion = 0;
 let connectionState = "disconnected";
 let sseClients = new Set();
 
-// Rapid-cycle detection: track how many times we open→close in under RAPID_MS
 const RAPID_MS = 8000;
 const MAX_RAPID_CYCLES = 3;
 let rapidCycleCount = 0;
 let lastOpenTime = 0;
 let reconnectTimer = null;
+
+// Track whether we want to stay disconnected (manual disconnect)
+let manualDisconnect = false;
 
 function broadcast(event, data) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -190,11 +214,11 @@ function setConnectionState(state, qr = null) {
   } else if (state !== "qr") {
     qrCode = null;
   }
-  // Broadcast qrVersion (an integer), NOT the full QR base64 — keeps SSE/status payloads tiny
   broadcast("status", { connection: state, qrVersion: state === "qr" ? qrVersion : 0 });
 }
 
 function scheduleReconnect(delay = 2500) {
+  if (manualDisconnect) return;
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -203,7 +227,7 @@ function scheduleReconnect(delay = 2500) {
 }
 
 async function clearAuthAndReconnect() {
-  console.log("[WA] Stale session detected — clearing credentials for fresh QR scan");
+  console.log("[WA] Stale session — clearing credentials for fresh QR scan");
   const { rmSync } = await import("fs");
   try { rmSync(AUTH_DIR, { recursive: true, force: true }); } catch (_) {}
   mkdirSync(AUTH_DIR, { recursive: true });
@@ -213,6 +237,8 @@ async function clearAuthAndReconnect() {
 }
 
 async function startWhatsApp() {
+  if (manualDisconnect) return;
+
   const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -228,25 +254,22 @@ async function startWhatsApp() {
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
-  // Fetch latest WA version with a fallback so a network hiccup doesn't crash startup
   let version;
   try {
     ({ version } = await fetchLatestBaileysVersion());
   } catch (_) {
-    version = [2, 3000, 1023156030]; // known-good fallback
+    version = [2, 3000, 1023156030];
   }
 
   const sock = makeWASocket({
     version,
     logger,
     printQRInTerminal: false,
-    // Identify as WhatsApp Web on Chrome — reduces fingerprint-based rejections
     browser: Browsers.ubuntu("Chrome"),
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
-    // Generous timeouts to avoid 408 on slow networks
     connectTimeoutMs: 60_000,
     defaultQueryTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
@@ -264,14 +287,12 @@ async function startWhatsApp() {
 
     if (qr) {
       const QRCode = await import("qrcode");
-      // Large, high-quality QR — easier for phones to scan
       const qrDataUrl = await QRCode.toDataURL(qr, { scale: 12, margin: 2 });
       setConnectionState("qr", qrDataUrl);
-      console.log("[WA] QR code ready — scan with your phone to link the account");
+      console.log("[WA] QR code ready — scan with your phone");
       tgSend(
         "⚠️ <b>WhatsApp Checker — QR Code প্রয়োজন</b>\n\n" +
-        "WhatsApp একাউন্ট লিঙ্ক করতে QR code স্ক্যান করুন।\n" +
-        "অ্যাপ খুলুন এবং QR code স্ক্যান করুন।\n\n" +
+        "WhatsApp একাউন্ট লিঙ্ক করতে QR code স্ক্যান করুন।\n\n" +
         "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
         "qr"
       );
@@ -279,15 +300,15 @@ async function startWhatsApp() {
 
     if (connection === "open") {
       lastOpenTime = Date.now();
+      manualDisconnect = false;
       console.log("[WA] Connected successfully");
       setConnectionState("connected");
       tgSend(
         "✅ <b>WhatsApp Checker — সংযুক্ত হয়েছে</b>\n\n" +
-        "WhatsApp সফলভাবে কানেক্ট হয়েছে এবং সার্ভিস চালু আছে।\n\n" +
+        "WhatsApp সফলভাবে কানেক্ট হয়েছে।\n\n" +
         "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
         "connected"
       );
-      // Reset cycle counter only after staying connected for 30s
       setTimeout(() => {
         if (connectionState === "connected") rapidCycleCount = 0;
       }, 30000);
@@ -296,46 +317,44 @@ async function startWhatsApp() {
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
-      // connectionReplaced (440) = another session took over these credentials.
-      // Retrying with the same creds just produces another 440 loop, so treat it
-      // like a logout: wipe auth and re-show the QR code.
       const connectionReplaced = statusCode === DisconnectReason.connectionReplaced;
 
       waClient = null;
-      console.log(`[WA] Connection closed — status: ${statusCode ?? "unknown"}, loggedOut: ${loggedOut}, replaced: ${connectionReplaced}`);
+      console.log(`[WA] Closed — code: ${statusCode ?? "?"}, loggedOut: ${loggedOut}, replaced: ${connectionReplaced}`);
 
       const reason = loggedOut
-        ? "অ্যাকাউন্ট লগআউট হয়েছে (ফোন থেকে সেশন বাতিল)"
+        ? "অ্যাকাউন্ট লগআউট"
         : connectionReplaced
-        ? "অন্য ডিভাইস থেকে লগইন হওয়ায় সেশন বাতিল হয়েছে (কোড 440)"
-        : `অজানা কারণ (কোড: ${statusCode ?? "N/A"})`;
+        ? "অন্য ডিভাইস থেকে লগইন (কোড 440)"
+        : `কোড: ${statusCode ?? "N/A"}`;
 
       tgSend(
-        "🔴 <b>WhatsApp Checker — সংযোগ বিচ্ছিন্ন হয়েছে</b>\n\n" +
+        "🔴 <b>WhatsApp Checker — সংযোগ বিচ্ছিন্ন</b>\n\n" +
         `❌ কারণ: ${reason}\n` +
-        "🔄 স্বয়ংক্রিয়ভাবে পুনরায় সংযোগ করার চেষ্টা হচ্ছে…\n\n" +
+        (!manualDisconnect ? "🔄 পুনরায় সংযোগের চেষ্টা হচ্ছে…\n\n" : "") +
         "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
         "disconnected"
       );
 
+      if (manualDisconnect) {
+        setConnectionState("disconnected");
+        return;
+      }
+
       if (loggedOut || connectionReplaced) {
-        // Session invalid — clear credentials and show a fresh QR
         await clearAuthAndReconnect();
         return;
       }
 
-      // Detect rapid open→close cycle (stale/invalid session)
       const timeSinceOpen = Date.now() - lastOpenTime;
       if (lastOpenTime > 0 && timeSinceOpen < RAPID_MS) {
         rapidCycleCount++;
-        console.log(`[WA] Rapid cycle #${rapidCycleCount} (closed ${timeSinceOpen}ms after open)`);
         if (rapidCycleCount >= MAX_RAPID_CYCLES) {
           await clearAuthAndReconnect();
           return;
         }
       }
 
-      // Normal closure — reconnect with back-off
       const delay = rapidCycleCount > 0 ? 5000 + rapidCycleCount * 2000 : 2500;
       setConnectionState("connecting");
       console.log(`[WA] Reconnecting in ${delay}ms…`);
@@ -344,11 +363,25 @@ async function startWhatsApp() {
   });
 
   sock.ev.on("creds.update", saveCreds);
-
   return sock;
 }
 
 startWhatsApp().catch(console.error);
+
+// ─── Graceful Shutdown ────────────────────────────────────────────────────────
+
+async function gracefulShutdown(signal) {
+  console.log(`[Server] ${signal} received — shutting down gracefully`);
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (waClient) {
+    try { await waClient.end(); } catch (_) {}
+  }
+  db.close();
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 // ─── SSE ──────────────────────────────────────────────────────────────────────
 
@@ -356,6 +389,7 @@ app.get("/api/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // disables Nginx buffering for SSE
   res.flushHeaders();
 
   res.write(`event: status\ndata: ${JSON.stringify({ connection: connectionState, qrVersion: connectionState === "qr" ? qrVersion : 0 })}\n\n`);
@@ -372,23 +406,25 @@ app.get("/api/events", (req, res) => {
   });
 });
 
-// ─── Status & Health ──────────────────────────────────────────────────────────
+// ─── Health & Status ──────────────────────────────────────────────────────────
 
 app.get("/api/healthz", (req, res) => {
-  res.json({ status: "ok", connection: connectionState });
+  res.json({
+    status: "ok",
+    connection: connectionState,
+    uptime: Math.floor(process.uptime()),
+    memory: Math.round(process.memoryUsage().rss / 1024 / 1024) + "MB",
+    clients: sseClients.size,
+  });
 });
 
 app.get("/api/status", (req, res) => {
   res.json({
     connection: connectionState,
-    // Return qrVersion (integer) so the client knows when to refresh /api/qr
-    // NOT the full base64 — keeps the payload tiny even on slow connections
     qrVersion: connectionState === "qr" ? qrVersion : 0,
   });
 });
 
-// Serve the current QR code as a PNG image.
-// The client loads <img src="/api/qr?v={qrVersion}"> — ?v just busts the browser cache.
 app.get("/api/qr", (req, res) => {
   if (!qrCode || connectionState !== "qr") {
     return res.status(404).json({ error: "No QR available right now" });
@@ -400,10 +436,11 @@ app.get("/api/qr", (req, res) => {
   res.send(buf);
 });
 
-// ─── Force fresh QR (wipes auth + restarts session) ──────────────────────────
+// ─── Force fresh QR ───────────────────────────────────────────────────────────
 
 app.post("/api/force-qr", async (req, res) => {
-  console.log("[WA] Force-QR requested by user — wiping auth and regenerating");
+  console.log("[WA] Force-QR requested — wiping auth");
+  manualDisconnect = false;
   if (waClient) {
     try { await waClient.end(); } catch (_) {}
     waClient = null;
@@ -413,12 +450,13 @@ app.post("/api/force-qr", async (req, res) => {
   res.json({ message: "Fresh QR incoming…", connection: "connecting" });
 });
 
-// ─── Connect (manual trigger) ─────────────────────────────────────────────────
+// ─── Connect (manual) ────────────────────────────────────────────────────────
 
 app.post("/api/connect", async (req, res) => {
   if (connectionState === "connected") {
     return res.json({ message: "Already connected", connection: connectionState });
   }
+  manualDisconnect = false;
   if (waClient) {
     try { await waClient.end(); } catch (_) {}
     waClient = null;
@@ -430,7 +468,21 @@ app.post("/api/connect", async (req, res) => {
   res.json({ message: "Connecting…", connection: "connecting" });
 });
 
-// ─── Check (single number via GET) ───────────────────────────────────────────
+// ─── Disconnect (manual) ─────────────────────────────────────────────────────
+
+app.post("/api/disconnect", async (req, res) => {
+  console.log("[WA] Manual disconnect requested");
+  manualDisconnect = true;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (waClient) {
+    try { await waClient.end(); } catch (_) {}
+    waClient = null;
+  }
+  setConnectionState("disconnected");
+  res.json({ message: "Disconnected", connection: "disconnected" });
+});
+
+// ─── Check single number ─────────────────────────────────────────────────────
 
 app.get("/api/check/:number", async (req, res) => {
   if (connectionState !== "connected" || !waClient) {
@@ -447,33 +499,23 @@ app.get("/api/check/:number", async (req, res) => {
 
   if (!digits || digits.length < 7) {
     return res.status(400).json({
-      number: raw,
-      formattedNumber: raw,
-      hasWhatsapp: false,
-      error: "Invalid number format",
+      number: raw, formattedNumber: raw, hasWhatsapp: false, error: "Invalid number format",
     });
   }
 
   try {
     const [result] = await waClient.onWhatsApp(digits);
-    const hasWhatsapp = result?.exists === true;
     return res.json({
-      number: raw,
-      formattedNumber: `+${digits}`,
-      hasWhatsapp,
-      error: null,
+      number: raw, formattedNumber: `+${digits}`, hasWhatsapp: result?.exists === true, error: null,
     });
   } catch (err) {
     return res.status(500).json({
-      number: raw,
-      formattedNumber: `+${digits}`,
-      hasWhatsapp: false,
-      error: "Could not determine (network issue)",
+      number: raw, formattedNumber: `+${digits}`, hasWhatsapp: false, error: "Could not determine (network issue)",
     });
   }
 });
 
-// ─── Check (batch via POST) ───────────────────────────────────────────────────
+// ─── Batch check ─────────────────────────────────────────────────────────────
 
 app.post("/api/check", async (req, res) => {
   if (connectionState !== "connected" || !waClient) {
@@ -496,43 +538,54 @@ app.post("/api/check", async (req, res) => {
   let withWA = 0;
   let withoutWA = 0;
 
-  for (const raw of numbers) {
-    const number = String(raw).trim().replace(/[\s\-\(\)]/g, "");
+  // Broadcast progress start
+  broadcast("progress", { checked: 0, total: numbers.length, current: null });
+
+  for (let i = 0; i < numbers.length; i++) {
+    const raw = String(numbers[i]);
+    const number = raw.trim().replace(/[\s\-\(\)]/g, "");
     const digits = number.replace(/^\+/, "");
 
     if (!digits || digits.length < 7) {
-      results.push({ number: String(raw), formattedNumber: String(raw), hasWhatsapp: false, error: "Invalid number format" });
+      results.push({ number: raw, formattedNumber: raw, hasWhatsapp: false, error: "Invalid number format" });
       withoutWA++;
-      continue;
-    }
-
-    try {
-      const [result] = await waClient.onWhatsApp(digits);
-      if (result?.exists) {
-        results.push({ number: String(raw), formattedNumber: `+${digits}`, hasWhatsapp: true, error: null });
-        withWA++;
-      } else {
-        results.push({ number: String(raw), formattedNumber: `+${digits}`, hasWhatsapp: false, error: null });
+    } else {
+      try {
+        const [result] = await waClient.onWhatsApp(digits);
+        if (result?.exists) {
+          results.push({ number: raw, formattedNumber: `+${digits}`, hasWhatsapp: true, error: null });
+          withWA++;
+        } else {
+          results.push({ number: raw, formattedNumber: `+${digits}`, hasWhatsapp: false, error: null });
+          withoutWA++;
+        }
+      } catch (err) {
+        results.push({ number: raw, formattedNumber: `+${digits}`, hasWhatsapp: false, error: "Network issue" });
         withoutWA++;
+        console.error(`[CHECK] Error +${digits}:`, err.message);
       }
-    } catch (err) {
-      results.push({ number: String(raw), formattedNumber: `+${digits}`, hasWhatsapp: false, error: "Could not determine (network issue)" });
-      withoutWA++;
-      console.error(`[CHECK] Error checking +${digits}:`, err.message);
     }
 
-    await new Promise((r) => setTimeout(r, 300));
+    // Broadcast live progress after each number
+    broadcast("progress", {
+      checked: i + 1,
+      total: numbers.length,
+      current: `+${digits}`,
+      withWA,
+      withoutWA,
+    });
+
+    if (i < numbers.length - 1) await new Promise((r) => setTimeout(r, 300));
   }
 
-  const errorCount = results.filter((r) => r.error).length;
+  // Progress done
+  broadcast("progress", { checked: numbers.length, total: numbers.length, done: true });
+
+  const errorCount = results.filter((r) => r.error && r.error !== "Invalid number format").length;
   if (errorCount > 0) {
     tgSend(
       "⚠️ <b>WhatsApp Checker — চেকিং সমস্যা</b>\n\n" +
-      `📋 মোট নম্বর: ${numbers.length}\n` +
-      `✅ WhatsApp আছে: ${withWA}\n` +
-      `❌ WhatsApp নেই: ${withoutWA - errorCount}\n` +
-      `⚠️ নেটওয়ার্ক সমস্যা: ${errorCount}\n\n` +
-      "কিছু নম্বর চেক করা যায়নি (নেটওয়ার্ক ইস্যু)।\n\n" +
+      `📋 মোট: ${numbers.length} | ✅ আছে: ${withWA} | ❌ নেই: ${withoutWA - errorCount} | ⚠️ সমস্যা: ${errorCount}\n\n` +
       "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }),
       "check_error"
     );
@@ -557,6 +610,19 @@ app.get("/api/history/:id", (req, res) => {
   res.json({ ...rowToSession(session), results });
 });
 
+app.delete("/api/history/:id", (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const session = stmts.getSession.get(id);
+  if (!session) return res.status(404).json({ error: "Session not found" });
+  stmts.deleteSession.run(id);
+  res.json({ message: "Session deleted" });
+});
+
+app.delete("/api/history", (req, res) => {
+  stmts.clearAllSessions.run();
+  res.json({ message: "All history cleared" });
+});
+
 // ─── Stats ────────────────────────────────────────────────────────────────────
 
 app.get("/api/stats", (req, res) => {
@@ -569,36 +635,40 @@ app.get("/api/stats", (req, res) => {
     totalWithWhatsapp: withWA,
     totalWithoutWhatsapp: Number(row.total_without),
     successRate: total > 0 ? Math.round((withWA / total) * 1000) / 10 : 0,
+    uptime: Math.floor(process.uptime()),
   });
 });
 
-// ─── API Docs (JSON) ──────────────────────────────────────────────────────────
+// ─── API Docs ─────────────────────────────────────────────────────────────────
 
 app.get("/api/docs", (req, res) => {
-  res.json({ title: "WhatsApp Number Checker API", version: "1.0.0", baseUrl: "/api" });
+  res.json({ title: "WhatsApp Number Checker API", version: "2.0.0", baseUrl: "/api" });
 });
 
-// ─── Static frontend (production) ────────────────────────────────────────────
-// When the Vite build output exists, serve the React app for all non-API routes.
+// ─── Static Frontend (production) ────────────────────────────────────────────
 
 const distDir = join(__dirname, "dist", "public");
 if (existsSync(distDir)) {
-  app.use(express.static(distDir));
-  // SPA fallback — serve index.html for any unmatched route (Express 5 syntax)
+  app.use(express.static(distDir, {
+    maxAge: "1d",
+    etag: true,
+  }));
   app.get("/{*path}", (_req, res) => {
     res.sendFile(join(distDir, "index.html"));
   });
   console.log(`[API] Serving static frontend from ${distDir}`);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Start ────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[API] WhatsApp checker server running on port ${PORT}`);
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`[API] WhatsApp Checker v2.0 running on port ${PORT} (${IS_PROD ? "production" : "development"})`);
   tgSend(
     "🚀 <b>WhatsApp Checker — সার্ভার চালু হয়েছে</b>\n\n" +
-    `পোর্ট: ${PORT}\n` +
-    "WhatsApp সংযোগ শুরু হচ্ছে…\n\n" +
+    `পোর্ট: ${PORT} | মোড: ${IS_PROD ? "Production" : "Dev"}\n\n` +
     "🕐 সময়: " + new Date().toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" })
   );
 });
+
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
