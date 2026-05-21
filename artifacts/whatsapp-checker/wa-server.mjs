@@ -190,13 +190,13 @@ async function tgSendPhoto(base64Image, caption) {
   try {
     const base64 = base64Image.replace(/^data:image\/png;base64,/, "");
     const buf = Buffer.from(base64, "base64");
-    const blob = new (require("buffer").Blob)([buf], { type: "image/png" });
+    const blob = new Blob([buf], { type: "image/png" });
 
     const form = new FormData();
     form.append("chat_id", TG_CHAT_ID);
     form.append("caption", caption);
     form.append("parse_mode", "HTML");
-    form.append("photo", new File([blob], "qr.png", { type: "image/png" }));
+    form.append("photo", blob, "qr.png");
 
     await fetch(`${TG_API}/sendPhoto`, {
       method: "POST",
@@ -204,8 +204,7 @@ async function tgSendPhoto(base64Image, caption) {
     });
   } catch (e) {
     console.error(`[TG] Photo send failed: ${e.message}`);
-    // fallback: send text
-    tgSend(caption);
+    tgSend(caption + "\n\n(Photo failed to send)");
   }
 }
 
